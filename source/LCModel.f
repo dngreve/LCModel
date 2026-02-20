@@ -247,6 +247,20 @@ c        is zero).
 C     -------------------------------------------------------------------------
       if (noffset .le. 0) zero_voxel(1) = .false.
       voxel1 = .true.
+
+      write (*, '("ioffset_current_in "I7)') ioffset_current_in
+      write (*, '("noffset            "I7)') noffset
+      write (*, '("ndslice     "I7)') ndslic
+      write (*, '("ndrows      "I7)') ndrows
+      write (*, '("ndcols      "I7)') ndcols
+      write (*, '("irow_center "I7)') irow_center
+      write (*, '("icol_center "I7)') icol_center
+      write (*, '("nvoxsk "I7)') nvoxsk
+      write (*, '("bascal "L1)') bascal
+      write (*, '("lcsi_sav_1 "L1)') lcsi_sav_1
+      write (*, '("omit_chless "L1)') omit_chless
+      write (*, '("DOFULL "L1)') DOFULL
+      
       do 100 ioffset = ioffset_current_in, noffset
          if (.not. voxel1) then
             rewind lraw
