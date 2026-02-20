@@ -6,7 +6,7 @@ test_lcm/out.ps: binaries/linux/lcmodel
 
 package: binaries/linux/lcmodel.xz
 
-binaries/linux/lcmodel: | binaries/linux/
+binaries/linux/lcmodel: source/LCModel.f | binaries/linux/
 	gfortran -std=legacy -O3 source/LCModel.f -o binaries/linux/lcmodel
 
 %/:
