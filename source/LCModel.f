@@ -10540,7 +10540,8 @@ c     -----------------------------------------------------------------------
          end if
          len_namrel = ilen(namrel)
          write (csv_line(2), 5586) idrow, idcol
- 5586    format (i3, ', ', i3)
+C Change this from 3 to 7 so that col and row can be greater than 999
+ 5586    format (i7, ', ', i7)
       end if
       if (lprint .gt. 0) then
          if (.not.fxdegp   .and.   ndegppm3_used .gt. 0)
