@@ -372,6 +372,8 @@ C                 -------------------------------------------------------------
          close (12)
          close (13)
       end if
+C Normal exit
+      print *, "LCModel exiting normally"
       stop
  801  call errmes(1, -4, chsubp)
  802  call errmes(2, -4, chsubp)
@@ -2316,6 +2318,7 @@ c     ------------------------------------------------------------------------
             IF (LPRINT .GT. 0) WRITE (LPRINT,5050) ERTYPE(IABS(ILEVEL)),
      1                                             CHSUBP, NUMBER
             WRITE (*,5050) ERTYPE(IABS(ILEVEL)), CHSUBP, NUMBER
+            print *, "Exiting L2320"
             STOP
          END IF
          CALL EXITPS (.true.)
@@ -2342,6 +2345,7 @@ c     ------------------------------------------------------------------------
             IF (LPRINT .GT. 0) WRITE (LPRINT,5050) ERTYPE(IABS(ILEVEL)),
      1                                             CHSUBP, NUMBER
             WRITE (*,5050) ERTYPE(IABS(ILEVEL)), CHSUBP, NUMBER
+            print *, "Exiting L2347"
             STOP
          END IF
          CALL EXITPS (.true.)
@@ -2354,6 +2358,7 @@ c     ------------------------------------------------------------------------
             IF (LPRINT .GT. 0) WRITE (LPRINT,5050) ERTYPE(IABS(ILEVEL)),
      1                                             CHSUBP, NUMBER
             WRITE (*,5050) ERTYPE(IABS(ILEVEL)), CHSUBP, NUMBER
+            print *, "Exiting L2360"
             STOP
          END IF
          CALL EXITPS (.true.)
@@ -8433,6 +8438,7 @@ C     1                                                   1, CHSUBP)
                call savbes(1)
                call savbes(2)
                call finout ()
+               print *, "Exiting L8440"
                stop
             end if
          END IF
@@ -10906,7 +10912,12 @@ c        ---------------------------------------------------------------------
 C        call fix_g77_namelist(lcoraw) !sun
          close (lcoraw)
       end if
-      if (lstop) STOP
+      if (lstop) then
+C        Removing this stop allows lcmodel to continue in a multivoxel 
+        print *, "Error in voxel but continuing"
+C        print *, "Exiting L10915"
+C        STOP
+      end if
       END
 C
 C
