@@ -7,8 +7,7 @@ test_lcm/out.ps: binaries/linux/lcmodel
 package: binaries/linux/lcmodel.xz
 
 binaries/linux/lcmodel: | binaries/linux/
-	gfortran -c -fno-backslash -fno-f2c -O3 -fall-intrinsics -std=legacy -Wuninitialized -ffpe-summary=none source/LCModel.f
-	gfortran LCModel.o -o $@
+	gfortran -std=legacy -O3 source/LCModel.f -o binaries/linux/lcmodel
 
 %/:
 	mkdir -p $@
