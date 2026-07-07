@@ -5,3 +5,7 @@
 LCModel.exe
 lcmodel
 test_lcm/out.ps
+*.mod
+.~*
+test_lcm/multi-voxel-10/multi-voxel.csv
+test_lcm/multi-voxel/multi-voxel.csv
