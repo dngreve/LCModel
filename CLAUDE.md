@@ -91,16 +91,18 @@ semantics — they can silently change fit results.
 
 LCModel's correctness is defined by numerical agreement with reference
 output, not by unit tests in the usual sense. The Makefile provides
-three test targets:
+three test targets (these are **file targets**, not phony names — invoke
+them by the output file path, using `-B` to force a rebuild if needed):
 
-- `make test` (or whatever the default target is) — original single-voxel
-  case, diffs against `out_ref_build.ps`.
-- `make multi-voxel` — 100-voxel dataset, exercises the multi-voxel loop
-  fully. Slower to run; use this before merging/finishing a change.
-- `make multi-voxel-10` — same as above but only 10 voxels. Much faster,
-  so use this as the quick check while iterating on goal #1/#2/#3 work,
-  then confirm with the full `multi-voxel` target before considering the
-  change done.
+- `make test_lcm/out.ps` — original single-voxel case, diffs against
+  `out_ref_build.ps`.
+- `make test_lcm/multi-voxel/multi-voxel.csv` — 100-voxel dataset,
+  exercises the multi-voxel/multi-ring loop fully. Slower to run; use
+  this before merging/finishing a change.
+- `make test_lcm/multi-voxel-10/multi-voxel.csv` — same as above but
+  only 10 voxels. Much faster, so use this as the quick check while
+  iterating on goal #1/#2/#3 work, then confirm with the full
+  `multi-voxel` target before considering the change done.
 
 **A change is only considered passing if all three tests pass** — the
 single-voxel case guards against regressions in the non-multi-voxel path,
@@ -156,6 +158,17 @@ scratch.
 - When adding new code, F77-style fixed-form is fine for consistency
   with the surrounding file; don't mix in free-form Fortran in the same
   source file without a good reason.
+- **Fortran identifiers and keywords are case-insensitive** — `CALL
+  MYDATA` and `call mydata` are the same statement. This codebase mixes
+  capitalization inconsistently (e.g. `CALL DATAIN ()` vs.
+  `call mydata ()` in nearby code). Any grep/search for call sites,
+  variable usage, or COMMON-block references **must be case-insensitive**
+  (`grep -i`), or it will silently miss real occurrences — this already
+  caused one missed call site during the goal #1 investigation (a
+  case-sensitive search for `CALL MYDATA` missed `call mydata ()` at
+  line 1317, inside `average()`). Always re-verify a "confirmed
+  complete" call-site or reference inventory with a case-insensitive
+  pass before treating it as exhaustive.
 
 ### Per-ring I/O caching (goal #1) — findings confirmed by trace
 
@@ -229,6 +242,122 @@ Decide explicitly whether goal #1's fix should cover only
 `LRAW`/`LH2O`, or all three re-read sites in one pass, since they share
 a root cause. Don't silently expand scope without noting the decision
 here.
+
+### Goal #1 implementation plan — settled, two risks open before coding
+
+Design is settled: build an in-memory cache once inside
+`check_zero_voxels` (source/LCModel.f:1198-1248) — it already does one
+full sequential pass through `LRAW` in `ivoxel` order and previously
+discarded the data; now it captures it instead. `MYDATA`
+(source/LCModel.f:2775-2966) branches on a new `raw_cache_ok` flag: if
+true, reads from the cache; if false (allocation/read failure), falls
+back to the original disk-read path unchanged — no functionality lost.
+Uses `ALLOCATABLE` arrays sized to the actual run's `NUNFIL` and grid
+dimensions (not the `MUNFIL`/`mvoxel` compiled maxima — a static array
+at those maxima would be ~68 TB). `SCALE_RAW`/`SCALE_H2O` computation
+stays exactly where it is (only their `TRAMP`/`VOLUME` inputs are
+cached) because `fcalib` can be perturbed per-voxel by `LOADCH` and
+`SCALE_RAW` reflects voxel-1's active `fcalib` specifically — moving
+this earlier would silently change behavior. `LOADCH`'s separate
+rewind-and-rescan pattern is confirmed untouched/out of scope for this
+change. Checkpoint/resume is unaffected because `check_zero_voxels` runs
+before the checkpoint-restore block and always covers the whole grid
+regardless of resume point — same as today.
+
+**Two things must be confirmed before/while implementing, not assumed:**
+
+1. **`ivoxel` ordering parity — CONFIRMED, with a real bug caught and
+   fixed in the plan before any code was written.** `ivoxel` is reset to
+   0 immediately before the triple loop and incremented by exactly 1 at
+   the innermost (`idcol`) level, with identical loop-variable order
+   (`idslic → idrow → idcol`) and identical bounds at both the
+   `check_zero_voxels` build site and the main ring loop's lookup site —
+   these two line up 1:1.
+   **However:** `average()` (called when `iaverg .ge. 1`, source/LCModel.f
+   ~1317) calls `mydata()` **directly**, using its own counter `jvoxel`
+   — never syncing COMMON `ivoxel`. `DATAIN`'s existing
+   `if (iaverg .le. 0) CALL MYDATA()` gate only stops the *main ring
+   loop* from calling `MYDATA` in this mode — it does not make `MYDATA`
+   itself unreachable from `average()`'s own loop. Without an explicit
+   guard, every call to `mydata()` inside `average()` would silently
+   index `DATAT_cache(:, ivoxel)` using whatever stale `ivoxel` value
+   `check_zero_voxels` left behind (its final value, since that loop
+   runs to completion first) — feeding every averaging channel the same
+   wrong cached voxel. **Required fix, now part of the plan:** the
+   cache-lookup branch inside `MYDATA` must check `iaverg .le. 0` in
+   addition to `raw_cache_ok` before trusting the cache — mirroring
+   `DATAIN`'s own gate exactly — so any call reaching `MYDATA` via
+   `average()` always takes the disk-read path, unconditionally.
+   **Lesson for the rest of this project:** this was found only because
+   an "it's out of scope, that path doesn't touch the cache" claim got
+   pushed on rather than accepted. Before finalizing any guard/gate in
+   this codebase, explicitly enumerate *every* call site of the
+   function being gated (grep for all callers) rather than reasoning
+   from the two or three sites already in view — `average()` was an
+   undocumented third caller nobody had listed going in.
+   **CLOSED.** Full call-site inventory confirmed (case-insensitive
+   search — see Fortran-conventions note below): exactly three call
+   sites total. `DATAIN` (source/LCModel.f:318, main ring loop) has no
+   `iaverg` gate itself — it just delegates to `MYDATA`'s internal
+   check. `MYDATA` has exactly two callers, which partition cleanly on
+   `iaverg`: `DATAIN` (line 2511, fires only when `iaverg .le. 0`) and
+   `average()` (line 1317, fires only when `iaverg .ge. 1`, since
+   `average()` itself is only called when `iaverg .ge. 1`). The
+   `iaverg .le. 0` guard added to `MYDATA`'s cache-lookup branch fully
+   and correctly discriminates between the two — no third caller can
+   slip past it.
+
+2. **RAW vs. H2O record/voxel-count parity — CLOSED.** Not
+   independently verified by file content — guaranteed only by
+   construction, and that construction is confirmed sufficient. Both
+   reads use the same global `NUNFIL` (no separate `NUNFIL_H2O` exists
+   anywhere in the file), and `MYDATA` issues exactly one `LRAW` read
+   and one `LH2O` read per call, in lockstep, using the same grid
+   dimensions for both — so the two files are already consumed in
+   strict 1:1 correspondence today. If the files were physically
+   mismatched (wrong length or wrong voxel count), the existing code
+   already fails fatally (`end=810` → `errmes` severity 4) rather than
+   silently misaligning — there is no existing tolerance for a mismatch
+   to preserve or replicate. **Conclusion: the H2O cache reuses the
+   identical `(NUNFIL, ivoxel)` indexing as the RAW cache** — giving it
+   an independent dimension would invent new mismatch-tolerance behavior
+   beyond current scope, contradicting the "preserve existing behavior
+   exactly" / "smallest change" constraints.
+   **One incidental, documented (not hidden) behavior shift:** today, a
+   deficient `LH2O` file's fatal error surfaces whenever the ring loop
+   first reaches the affected grid position (first ring pass). With the
+   new dedicated `LH2O` pass in `check_zero_voxels`, the same fatal
+   error instead surfaces during cache-build, before the ring loop
+   starts — same ultimate failure, same voxel identified, only the
+   wall-clock timing of the error changes. Flag this explicitly in the
+   regression review even though it's benign — it's a real (if trivial)
+   behavior difference, not "byte-for-byte identical."
+
+**Both risk items are now closed.** The plan has been through: ring-
+structure diagnosis, file-format constraint check, prior-state safety
+confirmation, checkpoint/resume safety confirmation, a real stale-cache
+bug caught and fixed (`average()`'s direct `mydata()` calls), a complete
+call-site inventory, and RAW/H2O parity. This is a reasonable point to
+move from Plan mode into writing the actual code — implement, then run
+the full regression protocol (all three test targets, plus the two
+manual checks: a run with `FILH2O` set, and a checkpoint/resume run).
+
+**Test coverage gaps flagged by the plan itself — required, not optional,
+before calling goal #1 done:**
+- A run with `FILH2O` set (exercises the entirely-new H2O caching path;
+  confirm whether existing fixtures already cover this — if not, add
+  one).
+- A checkpoint/resume run (`lcsi_sav_1`/`lcsi_sav_2` present, restarting
+  mid-grid) — the plan reasons this is safe but it hasn't been
+  empirically confirmed.
+- Dev-aid check: temporarily force `raw_cache_ok = .false.` and re-run
+  the full regression protocol to confirm the retained disk-read
+  fallback still reproduces the pre-change reference output bit-for-bit
+  — validates the fallback path wasn't altered while editing `MYDATA`.
+- First build (`make binaries/linux/lcmodel`) is a go/no-go checkpoint
+  for whether `gfortran -std=legacy -O3` accepts the `ALLOCATABLE`
+  extension in this fixed-form file — if it doesn't, the design needs a
+  fallback (e.g. a generously-bounded static array) before proceeding.
 
 ## Reference material
 
