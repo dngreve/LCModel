@@ -342,8 +342,59 @@ move from Plan mode into writing the actual code — implement, then run
 the full regression protocol (all three test targets, plus the two
 manual checks: a run with `FILH2O` set, and a checkpoint/resume run).
 
-**Test coverage gaps flagged by the plan itself — required, not optional,
-before calling goal #1 done:**
+**First build is the go/no-go checkpoint for whether `gfortran
+-std=legacy -O3` accepts the `ALLOCATABLE` extension in this fixed-form
+file.** — **Result: `ALLOCATABLE` cannot be a `COMMON`-block member**
+(gfortran: "COMMON attribute conflicts with ALLOCATABLE attribute"),
+confirmed via an isolated standalone test before touching the real file.
+**Design updated accordingly:** the cache lives in a `MODULE RAWCACHE`
+instead of a `/BLRAWCACHE/` COMMON block in `lcmodel.inc`. This is a
+pure storage-mechanism swap — none of the logic-level guarantees already
+vetted (ivoxel ordering parity, the `iaverg .le. 0` guard, RAW/H2O
+shared indexing) depended on COMMON specifically, so none of that needed
+re-verifying. `check_zero_voxels` (builder) and `MYDATA` (reader) each
+need `USE RAWCACHE` as their first statement instead of picking up these
+variables from `lcmodel.inc`.
+Module-persistence semantics were **empirically confirmed**, not
+assumed: the module-level initializer (`raw_cache_ok = .false.`) fires
+exactly once at program start; `USE`-association across
+`check_zero_voxels` (called once) and `MYDATA` (called once per voxel
+per ring, potentially hundreds of times) shares the same persistent
+storage location — no reset, no re-triggering per `USE`. Verified with a
+standalone test: one builder call, five-plus reader calls including one
+from a call site that never invoked the builder, value persisted
+correctly throughout.
+**Two items still open on this sub-design, not yet confirmed:**
+- Module must be placed lexically before any subroutine that `USE`s it
+  in the single-file compilation — confirm actual placement relative to
+  `PROGRAM LCMODL`/`check_zero_voxels`/`MYDATA`.
+- The cached character lengths (`fmtdat_raw_cache*80`, `id_raw_cache*20`)
+  are hardcoded literals that must independently track `MCHFMT`/`MCHID`
+  in `lcmodel.inc` — two numbers kept in sync only by convention, not by
+  the compiler. Prefer referencing `MCHFMT`/`MCHID` directly if feasible,
+  rather than duplicating the literals (drift risk if either changes
+  later without updating the other).
+
+**Design status: fully vetted, diffs reviewed as text, ready to apply to
+disk.** Every risk raised during review is closed: ring-structure
+diagnosis, file-format constraint, prior-state safety, checkpoint/resume
+safety, the `average()` stale-cache bug (caught and fixed via an
+explicit `iaverg .le. 0` guard on every cache-consumption site), complete
+call-site inventory, RAW/H2O parity, the COMMON→MODULE pivot (with
+empirical persistence confirmation), module placement, `MCHFMT`/`MCHID`
+sharing via a new `lcmodel_params.inc`, the SEQPAR-probe/`bascal` gating
+equivalence (confirmed identical, not just "probably fine" — the
+original authors' own comments in `MYBASI` document that
+`echot_raw`/`seq_raw` are expected unset during `bascal` runs), and the
+`ivoxel` COMMON-promotion mechanics (no textual change needed — `ivoxel`
+was already a bare implicitly-typed local in both `PROGRAM LCMODL` and
+`check_zero_voxels`, so adding it to `/BLINT/` via `lcmodel.inc` is
+sufficient). Nothing left to verify at the design level — remaining
+checkpoints are execution: the build gate, the regression protocol, and
+the two manual checks below.
+
+**Test coverage gaps flagged by the plan itself — required, not
+optional, before calling goal #1 done:**
 - A run with `FILH2O` set (exercises the entirely-new H2O caching path;
   confirm whether existing fixtures already cover this — if not, add
   one).
@@ -354,10 +405,6 @@ before calling goal #1 done:**
   the full regression protocol to confirm the retained disk-read
   fallback still reproduces the pre-change reference output bit-for-bit
   — validates the fallback path wasn't altered while editing `MYDATA`.
-- First build (`make binaries/linux/lcmodel`) is a go/no-go checkpoint
-  for whether `gfortran -std=legacy -O3` accepts the `ALLOCATABLE`
-  extension in this fixed-form file — if it doesn't, the design needs a
-  fallback (e.g. a generously-bounded static array) before proceeding.
 
 ## Reference material
 
