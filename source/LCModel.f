@@ -2,6 +2,37 @@ c  To Do:
 c  Check for '<<<<<<<<<<<<<<<'
 C
 C
+C  RAWCACHE: one-time cache of per-voxel LRAW/LH2O data, built once by
+C    CHECK_ZERO_VOXELS and consumed by MYDATA, to avoid re-reading and
+C    re-parsing LRAW/LH2O on every IOFFSET ring pass in multi-voxel runs.
+C    Sized dynamically to the actual NUNFIL/voxel count for this run (not
+C    the compiled maxima MUNFIL/MVOXEL in lcmodel.inc), since a static
+C    array covering the worst case would be infeasible (~68 TB).
+C    ALLOCATABLE arrays cannot be COMMON-block members (gfortran:
+C    "COMMON attribute conflicts with ALLOCATABLE attribute"), hence a
+C    MODULE.  PRIVATE/PUBLIC below keeps lcmodel_params.inc's parameter
+C    names from colliding with lcmodel.inc's own copies wherever a
+C    subroutine does both USE RAWCACHE and INCLUDE 'lcmodel.inc'.
+      MODULE RAWCACHE
+      INCLUDE 'lcmodel_params.inc'
+      PRIVATE
+      PUBLIC :: raw_cache_ok, havh2o_cache, nunfil_cached,
+     1          nvoxel_cached, fmtdat_raw_cache, fmtdat_h2o_cache,
+     2          id_raw_cache, bruker_raw_cache, seqacq_raw_cache,
+     3          bruker_h2o_cache, seqacq_h2o_cache, tramp_raw_cache,
+     4          volume_raw_cache, tramp_h2o_cache, volume_h2o_cache,
+     5          datat_cache, h2ot_cache
+      LOGICAL :: raw_cache_ok = .false., havh2o_cache = .false.
+      INTEGER nunfil_cached, nvoxel_cached
+      CHARACTER fmtdat_raw_cache*(MCHFMT), fmtdat_h2o_cache*(MCHFMT),
+     1          id_raw_cache*(MCHID)
+      LOGICAL bruker_raw_cache, seqacq_raw_cache,
+     1        bruker_h2o_cache, seqacq_h2o_cache
+      REAL tramp_raw_cache, volume_raw_cache,
+     1     tramp_h2o_cache, volume_h2o_cache
+      COMPLEX, ALLOCATABLE :: datat_cache(:,:), h2ot_cache(:,:)
+      END MODULE RAWCACHE
+C
 C  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
       PROGRAM LCMODL
 C
@@ -1196,14 +1227,19 @@ C
 C
 C  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
       subroutine check_zero_voxels ()
+      USE RAWCACHE
 c
-c Go through all voxels RAW file and set ZERO_VOXEL(IVOXEL)=T for zero voxels.
+c Go through all voxels of RAW file and set ZERO_VOXEL(IVOXEL)=T for zero
+c   voxels.  Also cache RAW (and, if present, H2O) time-domain data in
+c   DATAT_CACHE/H2OT_CACHE (module RAWCACHE), so MYDATA does not have to
+c   re-read/re-parse LRAW/LH2O once per IOFFSET ring in the main loop.
 c
       INCLUDE 'lcmodel.inc'
-      CHARACTER FMTDAT*(MCHFmt), ID*(MCHID)
+      CHARACTER FMTDAT*(MCHFmt), ID*(MCHID), seq*5
       LOGICAL bruker, seqacq
 c
       NAMELIST /NMID/ ID, FMTDAT, TRAMP, VOLUME, SEQACQ, BRUKER
+      NAMELIST /seqpar/ hzpppm, echot, seq
       CHSUBP='ZEROVX'
 c
 C     -------------------------------------------------------------------------
@@ -1218,11 +1254,47 @@ C      IF (FILRAW .NE. ' ') OPEN (LRAW, FILE=FILRAW, STATUS='OLD',!OSF
 C     1                           READONLY, err=803)!OSF
 C      IF (FILRAW .NE. ' ') OPEN (LRAW, FILE=FILRAW, STATUS='OLD',!IRIX
 C     1                           READONLY, err=803)!IRIX
+c     -------------------------------------------------------------------------
+c     SEQPAR probe, moved here (once) from MYDATA, where it used to run
+c       once per run under "if (voxel1)".  CHSUBP is set to 'MYDATA' for
+c       the duration so any ERRMES call reports the same subprogram tag
+c       as before.
+c     -------------------------------------------------------------------------
+      CHSUBP='MYDATA'
+      hzpppm_sav=hzpppm
+      hzpppm=-1.
+      seq=' '
+      echot=-1.
+      read (lraw, nml=seqpar, err=102, end=102)
+ 102  rewind lraw
+      if (hzpppm .gt. 0.) then
+         if (abs(hzpppm_sav / hzpppm - 1.) .gt. .05) call errmes
+     1                                               (4, 2, chsubp)
+      end if
+      hzpppm=hzpppm_sav
+      echot_raw=echot
+      seq_raw=seq
+      CHSUBP='ZEROVX'
 C     -------------------------------------------------------------------------
 C     Read time-domain data into DATAT.
 C     -------------------------------------------------------------------------
+      tramp = 1.
+      volume = 1.
+      id = ' '
+      FMTDAT=' '
+      BRUKER=.FALSE.
+      SEQACQ=.FALSE.
       READ (LRAW, NML=NMID, err=804, end=804)
       IF (FMTDAT .EQ. ' ') CALL ERRMES (1, 4, CHSUBP)
+      fmtdat_raw_cache = fmtdat
+      bruker_raw_cache = bruker
+      seqacq_raw_cache = seqacq
+      tramp_raw_cache = tramp
+      volume_raw_cache = volume
+      id_raw_cache = id
+      nunfil_cached = nunfil
+      nvoxel_cached = ndslic * ndrows * ndcols
+      allocate(datat_cache(nunfil, nvoxel_cached))
       ivoxel = 0
       do 110 idslic = 1, ndslic
          do 120 idrow = 1, ndrows
@@ -1232,6 +1304,7 @@ C     -------------------------------------------------------------------------
                zero_voxel(ivoxel) = .false.
                READ (LRAW, FMTDAT, err=805, end=805)
      1                 (DATAT(J),J=1,NUNFIL)
+               datat_cache(1:nunfil, ivoxel) = datat(1:nunfil)
                do 150 j = 1, nunfil
                   if (real(datat(j))**2 + aimag(datat(j))**2 .gt. 0.)
      1                  go to 130
@@ -1241,10 +1314,51 @@ C     -------------------------------------------------------------------------
  120     continue
  110  continue
       rewind lraw
+c     -------------------------------------------------------------------------
+c     Cache LH2O time-domain data too, if present, so MYDATA never needs
+c       to re-read it either.  Mirrors the LRAW pass above.  LH2O is
+c       CLOSEd afterward so MYDATA's own "if (voxel1) OPEN(LH2O,...)"
+c       still opens it fresh in the disk-read fallback path, unchanged.
+c     -------------------------------------------------------------------------
+      havh2o_cache = .false.
+      IF (FILH2O .ne. ' ') THEN
+         OPEN (LH2O, FILE=FILH2O, STATUS='OLD', err=811)!Cyg
+         tramp = 1.
+         volume = 1.
+         id = ' '
+         FMTDAT=' '
+         BRUKER=.FALSE.
+         SEQACQ=.FALSE.
+         READ (LH2O, NML=NMID, err=812, end=812)
+         IF (FMTDAT .EQ. ' ') CALL ERRMES (6, 4, CHSUBP)
+         fmtdat_h2o_cache = fmtdat
+         bruker_h2o_cache = bruker
+         seqacq_h2o_cache = seqacq
+         tramp_h2o_cache = tramp
+         volume_h2o_cache = volume
+         allocate(h2ot_cache(nunfil, nvoxel_cached))
+         ivoxel = 0
+         do 160 idslic = 1, ndslic
+            do 170 idrow = 1, ndrows
+               do 180 idcol = 1, ndcols
+                  ivoxel = ivoxel + 1
+                  READ (LH2O, FMTDAT, err=813, end=813)
+     1                    (H2OT(J),J=1,NUNFIL)
+                  h2ot_cache(1:nunfil, ivoxel) = h2ot(1:nunfil)
+ 180           continue
+ 170        continue
+ 160     continue
+         CLOSE (LH2O)
+         havh2o_cache = .true.
+      END IF
+      raw_cache_ok = .true.
       return
  803  call errmes (3, 4, chsubp)
  804  call errmes (4, 4, chsubp)
  805  call errmes (5, 4, chsubp)
+ 811  call errmes (7, 4, chsubp)
+ 812  call errmes (8, 4, chsubp)
+ 813  call errmes (9, 4, chsubp)
       end
 C
 C
@@ -2786,51 +2900,51 @@ C    this subprogram to use only standard I/O statements.
 C
 C^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ For user ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 C
+      USE RAWCACHE
       INCLUDE 'lcmodel.inc'
       save BRUKER_h2o, BRUKER_raw, fmtdat_h2o, fmtdat_raw, id,
      1     scale_h2o, scale_raw, seqacq_h2o, seqacq_raw
       CHARACTER FMTDAT*(MCHFmt), FMTDAT_h2o*(MCHFmt),
-     1          FMTDAT_raw*(MCHFmt), ID*(MCHID), seq*5
+     1          FMTDAT_raw*(MCHFmt), ID*(MCHID)
       LOGICAL bruker, BRUKER_h2o, BRUKER_raw,
      1        seqacq, seqacq_h2o, seqacq_raw
-      namelist /seqpar/ hzpppm, echot, seq
       NAMELIST /NMID/ ID, FMTDAT, TRAMP, VOLUME, SEQACQ, BRUKER
       CHSUBP='MYDATA'
-      if (voxel1) then
-c        ---------------------------------------------------------------------
-c        If not present in seqpar, then echot_raw = -1., and seq_raw = ' '.
-c        ---------------------------------------------------------------------
-         hzpppm_sav=hzpppm
-         hzpppm=-1.
-         seq=' '
-         echot=-1.
-         read (lraw, nml=seqpar, err=102, end=102)
- 102     rewind lraw
-         if (hzpppm .gt. 0.) then
-            if (abs(hzpppm_sav / hzpppm - 1.) .gt. .05) call errmes
-     1                                                  (4, 2, chsubp)
-         end if
-         hzpppm=hzpppm_sav
-         echot_raw=echot
-         seq_raw=seq
-      end if
+c     ---------------------------------------------------------------------
+c     SEQPAR probe (hzpppm/echot_raw/seq_raw) now done once by
+c       CHECK_ZERO_VOXELS, before the main IOFFSET loop, instead of once
+c       per run here under "if (voxel1)".
+c     ---------------------------------------------------------------------
       if (voxel1   .or.   lraw_at_top) then
 c        ---------------------------------------------------------------------
-c        Read NMID.
+c        Read NMID (or use the cache built once by CHECK_ZERO_VOXELS).
 c        ---------------------------------------------------------------------
-         tramp = 1.
-         volume = 1.
-         id = ' '
-         FMTDAT=' '
-         BRUKER=.FALSE.
-         SEQACQ=.FALSE.
-         READ (LRAW, NML=NMID, err=807, end=807)
-         IF (FMTDAT .EQ. ' ') CALL ERRMES (1, 4, CHSUBP)
-         FMTDAT_RAW=fmtdat
-         BRUKER_RAW=bruker
-         SEQACQ_RAW=seqacq
+         IF (raw_cache_ok   .and.   iaverg .le. 0) THEN
+            FMTDAT_RAW = fmtdat_raw_cache
+            BRUKER_RAW = bruker_raw_cache
+            SEQACQ_RAW = seqacq_raw_cache
+            TRAMP = tramp_raw_cache
+            VOLUME = volume_raw_cache
+            ID = id_raw_cache
+         ELSE
+            tramp = 1.
+            volume = 1.
+            id = ' '
+            FMTDAT=' '
+            BRUKER=.FALSE.
+            SEQACQ=.FALSE.
+            READ (LRAW, NML=NMID, err=807, end=807)
+            IF (FMTDAT .EQ. ' ') CALL ERRMES (1, 4, CHSUBP)
+            FMTDAT_RAW=fmtdat
+            BRUKER_RAW=bruker
+            SEQACQ_RAW=seqacq
+         END IF
       end if
-      READ (LRAW, FMTDAT_RAW, err=808, end=808) (DATAT(J),J=1,NUNFIL)
+      IF (raw_cache_ok   .and.   iaverg .le. 0) THEN
+         DATAT(1:NUNFIL) = datat_cache(1:NUNFIL, ivoxel)
+      ELSE
+         READ (LRAW, FMTDAT_RAW, err=808, end=808) (DATAT(J),J=1,NUNFIL)
+      END IF
       IF (LPRINT .GT. 0) then
          if (nlines_title .eq. 1) then
             WRITE (LPRINT,5110) TITLE_line(1), ID
@@ -2889,16 +3003,29 @@ C            OPEN (LH2O, FILE=FILH2O, STATUS='OLD', READONLY, err=800)!OSF
 C            OPEN (LH2O, FILE=FILH2O, STATUS='OLD', READONLY, err=800)!IRIX
          end if
          if (voxel1   .or.   lraw_at_top) then
-            FMTDAT=' '
-            BRUKER=.FALSE.
-            SEQACQ=.FALSE.
-            READ (LH2O, NML=NMID, err=809, end=809)
-            IF (FMTDAT .EQ. ' ') CALL ERRMES (3, 4, CHSUBP)
-            FMTDAT_H2O=fmtdat
-            BRUKER_H2O=bruker
-            SEQACQ_H2O=seqacq
+            IF (raw_cache_ok   .and.   iaverg .le. 0) THEN
+               FMTDAT_H2O = fmtdat_h2o_cache
+               BRUKER_H2O = bruker_h2o_cache
+               SEQACQ_H2O = seqacq_h2o_cache
+               TRAMP = tramp_h2o_cache
+               VOLUME = volume_h2o_cache
+            ELSE
+               FMTDAT=' '
+               BRUKER=.FALSE.
+               SEQACQ=.FALSE.
+               READ (LH2O, NML=NMID, err=809, end=809)
+               IF (FMTDAT .EQ. ' ') CALL ERRMES (3, 4, CHSUBP)
+               FMTDAT_H2O=fmtdat
+               BRUKER_H2O=bruker
+               SEQACQ_H2O=seqacq
+            END IF
          end if
-         READ (LH2O, FMTDAT_H2O, err=810, end=810) (H2OT(J),J=1,NUNFIL)
+         IF (raw_cache_ok   .and.   iaverg .le. 0) THEN
+            H2OT(1:NUNFIL) = h2ot_cache(1:NUNFIL, ivoxel)
+         ELSE
+            READ (LH2O, FMTDAT_H2O, err=810, end=810)
+     1              (H2OT(J),J=1,NUNFIL)
+         END IF
          havh2o = .true.
          if (voxel1) then
             if (amin1(tramp, volume) .le. 0.) then

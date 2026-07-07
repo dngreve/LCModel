@@ -20,24 +20,58 @@ file (`source/LCModel.f`), originally distributed as a closed-source binary
 and later open-sourced. Treat it as scientific/numerical software: the
 priority is *numerical correctness and reproducibility*, not code aesthetics.
 
+## Domain terminology / file-naming conventions
+
+**Don't assume software-testing naming conventions apply to MRS domain
+filenames** — this has already caused two wrong inferences in this
+project and is worth avoiding going forward.
+
+- **`multi-voxel.met`** — **input**: the metabolite spectra data
+  (`FILRAW`/`LRAW`). Not an output, despite the extension looking like
+  it could be a results table — confirmed directly, don't re-guess this.
+- **`multi-voxel.ref`** — **input**: the water reference spectra data
+  (`FILH2O`/`LH2O`). "`.ref`" here means "water reference scan," the MRS
+  domain meaning — not a "known-good expected output" the way
+  `.ref`/`reference` usually means in software test suites.
+- **`multi-voxel.csv`** — **output**: what the test run actually
+  produces.
+- **`test-reference-multi-voxel.csv`** — the real regression baseline
+  for this test — **this** is what `multi-voxel.csv` should be diffed
+  against, not `.met` or `.ref` (both of which are inputs, not
+  baselines).
+- **`control.file`** — input control-file configuration (drives what
+  LCModel does for a given run — priors options, file paths, etc.).
+- **`sim_se_csi_te16.basis`** — a basis-set file used for fitting (the
+  metabolite basis spectra LCModel fits the data against).
+- **When in doubt about what a file actually contains, ask before
+  writing a comparison/diff command** — don't infer purely from
+  filename pattern-matching against other tests in this repo or against
+  general software-testing conventions. Check `git log` (is it a
+  long-committed static file, or does it change every run?), check the
+  Makefile rule that produces/consumes it, or just ask directly.
+
 ## Current work: multi-voxel performance project
 
 This fork is a staged performance/architecture project on multi-voxel
 (MRSI-style) runs, in priority order. **Do the items in order** — later
 items depend on earlier ones being done safely.
 
-1. **Stop re-reading the whole input file per ring.** Confirmed via Claude
-   Code trace (see "Per-voxel I/O caching" below for full detail): this is
-   not a per-voxel re-read, it's a **per-ring** re-read. The scan pattern
-   is an expanding square (Chebyshev distance from center); each grid
-   position is fit exactly once, on the one ring matching its distance
-   from center, but the inner triple loop (`idslic`/`idrow`/`idcol`) does
-   not shrink to just that ring — it walks the *entire* grid on every
-   ring pass, calling `DATAIN`→`MYDATA` (and hitting `REWIND LRAW` /
-   `REWIND LH2O` at the top of each ring) unconditionally before the
-   `skip_voxel` check discards non-boundary positions. Net effect:
-   O(rings × grid-size) reads for O(grid-size) actual fits. Fix direction
-   is settled (see below) — implementation is not.
+1. **✅ DONE — Stop re-reading the whole input file per ring.** Confirmed
+   via Claude Code trace (see "Per-voxel I/O caching" below for full
+   detail): this was not a per-voxel re-read, it was a **per-ring**
+   re-read. The scan pattern is an expanding square (Chebyshev distance
+   from center); each grid position is fit exactly once, on the one ring
+   matching its distance from center, but the inner triple loop
+   (`idslic`/`idrow`/`idcol`) did not shrink to just that ring — it
+   walked the *entire* grid on every ring pass, calling `DATAIN`→`MYDATA`
+   (and hitting `REWIND LRAW`/`REWIND LH2O` at the top of each ring)
+   unconditionally before the `skip_voxel` check discarded non-boundary
+   positions. Net effect was O(rings × grid-size) reads for
+   O(grid-size) actual fits. **Fixed** via an in-memory cache
+   (`MODULE RAWCACHE`) built once in `check_zero_voxels`, consumed by
+   `MYDATA` with a `raw_cache_ok .and. iaverg .le. 0` guard, falling back
+   to the original disk-read path otherwise. All regression tests pass;
+   full closure detail in "Goal #1 implementation plan" below.
 2. **Option: derive priors from the first voxel only.** Add a control-file
    option so that, instead of updating priors after every voxel (current
    default behavior), priors are computed once from voxel 1 and reused
@@ -98,7 +132,13 @@ them by the output file path, using `-B` to force a rebuild if needed):
   `out_ref_build.ps`.
 - `make test_lcm/multi-voxel/multi-voxel.csv` — 100-voxel dataset,
   exercises the multi-voxel/multi-ring loop fully. Slower to run; use
-  this before merging/finishing a change.
+  this before merging/finishing a change. Inputs: `multi-voxel.met`
+  (metabolite spectra), `multi-voxel.ref` (water reference spectra),
+  `control.file`, `sim_se_csi_te16.basis` (basis set). Output:
+  `multi-voxel.csv` — **diff this against
+  `test-reference-multi-voxel.csv`**, the actual regression baseline.
+  Do not diff `.met`/`.ref` against anything — both are inputs, not
+  baselines (see "Domain terminology" above).
 - `make test_lcm/multi-voxel-10/multi-voxel.csv` — same as above but
   only 10 voxels. Much faster, so use this as the quick check while
   iterating on goal #1/#2/#3 work, then confirm with the full
@@ -115,7 +155,9 @@ For any change to `LCModel.f`:
 
 1. Build the binary (`make`).
 2. Run all three test targets.
-3. Diff each resulting `.ps` output against its reference.
+3. Diff each resulting output against its actual reference (`out.ps` vs
+   `out_ref_build.ps`; each `multi-voxel.csv` vs its own
+   `test-reference-multi-voxel.csv`).
    - Expected differences: build date, version string (`6.3-N` vs `6.3-R`
      style tags).
    - Any difference in fitted concentrations, CRLBs, SNR, or plotted
@@ -132,16 +174,17 @@ coverage once the project grows.
 ### New reference outputs for this project
 
 Reference outputs for the single-voxel, `multi-voxel`, and
-`multi-voxel-10` cases already exist and ship with their respective make
-targets — use those as the baseline rather than generating new ones from
-scratch.
+`multi-voxel-10` cases already exist (`out_ref_build.ps` and each
+directory's `test-reference-multi-voxel.csv`) — use those as the
+baseline rather than generating new ones from scratch.
 
 - For #2 and #3 (new prior-computation modes), generate and commit a new
-  reference output for each new option value the first time it's
-  implemented correctly and reviewed, ideally against the
-  `multi-voxel-10` dataset (fast) with a final confirmation against the
-  full `multi-voxel` dataset. These become the regression baseline for
-  that mode going forward — don't just eyeball a diff once and move on.
+  `test-reference-*.csv`-style baseline for each new option value the
+  first time it's implemented correctly and reviewed, ideally against
+  the `multi-voxel-10` dataset (fast) with a final confirmation against
+  the full `multi-voxel` dataset. These become the regression baseline
+  for that mode going forward — don't just eyeball a diff once and move
+  on.
 
 ## Fortran-specific conventions
 
@@ -393,18 +436,103 @@ sufficient). Nothing left to verify at the design level — remaining
 checkpoints are execution: the build gate, the regression protocol, and
 the two manual checks below.
 
-**Test coverage gaps flagged by the plan itself — required, not
-optional, before calling goal #1 done:**
-- A run with `FILH2O` set (exercises the entirely-new H2O caching path;
-  confirm whether existing fixtures already cover this — if not, add
-  one).
-- A checkpoint/resume run (`lcsi_sav_1`/`lcsi_sav_2` present, restarting
-  mid-grid) — the plan reasons this is safe but it hasn't been
-  empirically confirmed.
-- Dev-aid check: temporarily force `raw_cache_ok = .false.` and re-run
-  the full regression protocol to confirm the retained disk-read
-  fallback still reproduces the pre-change reference output bit-for-bit
-  — validates the fallback path wasn't altered while editing `MYDATA`.
+**GOAL #1 STATUS: DONE.** Implemented, correct, and regression-clean on
+all three test targets plus all required manual checks. Full closure:
+
+- **All three automated regression targets pass.** `out.ps` matches
+  `out_ref_build.ps`; both `multi-voxel.csv` outputs match their
+  respective `test-reference-multi-voxel.csv` exactly.
+- **`FILH2O` coverage — confirmed, already covered by existing
+  fixtures.** Both `test_lcm/multi-voxel/control.file` and
+  `test_lcm/multi-voxel-10/control.file` already set
+  `filh2o = 'multi-voxel.ref'`, so the regression runs that passed
+  already exercised the H2O caching path — no separate fixture was
+  needed.
+- **Dev-aid fallback check — confirmed.** Forced `raw_cache_ok = .false.`
+  after `check_zero_voxels()` and reran all three regression targets:
+  all matched the pre-change reference exactly, confirming the
+  disk-read fallback path in `MYDATA` was not altered while editing it.
+- **A real bug was caught and fixed by this fallback check, not just
+  confirmed clean.** `check_zero_voxels`'s own `NMID` read (used to get
+  `FMTDAT` for the zero-check pass) never initialized
+  `tramp`/`volume`/`id`/`FMTDAT`/`BRUKER`/`SEQACQ` before reading —
+  harmless in the original code (those values were discarded after use)
+  but now cached and consumed authoritatively by `MYDATA`. Uninitialized
+  `BRUKER`/`SEQACQ` (stack garbage, not guaranteed `.FALSE.`) caused an
+  unwanted conjugate/`SEQTOT` transform on `DATAT`, producing a real fit
+  regression (different noise-SD estimate, different plotted Y-scale)
+  despite the raw `DATAT` values themselves being provably identical
+  between cache and disk paths. **Fix applied:** the same
+  `tramp=1./volume=1./id=' '/FMTDAT=' '/BRUKER=.FALSE./SEQACQ=.FALSE.`
+  initialization `MYDATA` always had was added immediately before
+  `check_zero_voxels`'s `NMID` read. Found by comparing full-array
+  `DATAT` checksums between cache and disk paths (identical) then
+  checking what else the cache branch sets — not by guessing from the
+  symptom. **Lesson for future work in this file:** when duplicating a
+  read/parse pattern from one subroutine into another (as this project
+  does repeatedly), don't just copy the read statement — copy the
+  initialization that precedes it too, even if the original subroutine
+  discarded the values and "didn't need" the initialization at the time.
+- **Performance measured honestly — real but not strongly visible on
+  the bundled fixtures.** `multi-voxel` (100 voxels, `NUNFIL=1024`):
+  73.8s cache-enabled vs. 77.2s cache-disabled (~4% faster).
+  `multi-voxel-10`: no measurable difference (6.2–7.3s either way,
+  run-to-run noise exceeds the effect). At this scale, per-voxel fit
+  computation (`MYBASI`/`TWOREG`/regularized search) dominates
+  wall-clock time; the O(rings×grid)→O(grid) read-count reduction is
+  architecturally real but too small a fraction of total runtime to
+  show clearly on these particular fixtures, which are sized for
+  regression correctness, not performance benchmarking.
+- **✅ Real-world large-dataset validation — confirmed the performance
+  benefit at production scale.** A real 9343-voxel dataset: new
+  (cached) version ~1.6 hours; old (uncached) version projected
+  8–10 hours (still running at time of comparison) — roughly a 5–6×
+  speedup, exactly the scaling behavior predicted (the benefit grows
+  with grid size, which is why it was too small to see on the 100-voxel
+  fixture). Output confirmed identical between old and new versions for
+  the first ~3600 voxels completed by the old run at comparison time.
+  **Not yet confirmed for the full 9343 voxels** — the old run hadn't
+  finished. Worth a final check once it completes, to convert "matches
+  on the first ~3600" into "matches on all 9343," though given the
+  fixture-level regression tests already passed bit-for-bit and the
+  fallback path was separately verified, this is confirmation rather
+  than a live open risk.
+  This closes the original motivating complaint ("very slow" multi-voxel
+  runs) — the fix now has both correctness and performance validated at
+  a scale representative of real use, not just on small regression
+  fixtures.
+- **Checkpoint/resume run — deliberately SKIPPED, not overlooked.**
+  Decision: the checkpoint/resume mechanism (`lcsi_sav_1`/`lcsi_sav_2`,
+  `ioffset_current_in`/`nvoxels_done_in`) is not used by this project's
+  actual workflows, and hand-constructing synthetic mid-run checkpoint
+  state was judged higher-risk than valuable — a wrong synthetic state
+  would test "does the program tolerate a file I made up," not "does
+  resume actually work," which could give false confidence either way.
+  The plan's reasoning for why this should be safe (see "Known
+  interaction to protect explicitly," above) still stands as
+  **reasoning-only, not empirically confirmed**. If checkpoint/resume
+  ever becomes relevant to this project's actual use, the right way to
+  test it is to let a real run get interrupted naturally (kill a
+  `multi-voxel-10` run mid-scan, after checking where checkpoints
+  actually get written) and resume it for real, diffing the final
+  output against an uninterrupted run of the same dataset — not by
+  hand-building checkpoint files.
+- **No user-facing on/off toggle exists for the cache**, by deliberate
+  choice — it's an internals-only optimization intended to be
+  bit-for-bit transparent, not a new behavior needing a default-off
+  option like goals #2/#3. The only way to disable it is editing source
+  (`raw_cache_ok = .false.`) and recompiling, which is what the dev-aid
+  check above used. Revisit this only if a real debugging or
+  memory-constrained-system need for a runtime toggle comes up later.
+
+**Before committing:** clean up the working tree first —
+`git status` currently shows several untracked files that don't belong
+in the repo: `rawcache.mod` (compiled module artifact), stray backup
+files (`.~CLAUDE.md`, `binaries/linux/bak.lcmodel`,
+`source/dng.LCModel.f`/`dng2.LCModel.f` if not intentionally kept
+elsewhere), and unrelated screenshots. Add a `.gitignore` covering
+`*.mod` and editor backup patterns before the next commit so this
+doesn't recur.
 
 ## Reference material
 
