@@ -179,6 +179,7 @@ c
       INCLUDE 'lcmodel.inc'
       external ilen
       logical iok
+      CHARACTER CLIARG*64
       data nanalyses_done/0/, nvoxels_done/0/, nvoxels_done_in/0/
       chsubp = 'MAIN'
       version_lcm = '6.3-1N'
@@ -186,6 +187,51 @@ c
       VERSIO='LCModel (Version ' // version_lcm(:lversion_lcm) //
      1       ') Copyright: S.W. Provencher.' //
      2       '          Ref.: Magn. Reson. Med. 30:672-679 (1993).'
+C     -------------------------------------------------------------------------
+C     Parse command-line flags controlling UsePrior, before the control
+C       file is read (CALL MYCONT, below).
+C     -------------------------------------------------------------------------
+      UsePrior = USEPRIOR_DEFAULT
+      UsePrior_set_by_cli = .false.
+      first_prior_done = .false.
+      NCLIARGS = COMMAND_ARGUMENT_COUNT()
+      DO 45 ICLIARG = 1, NCLIARGS
+         CALL GET_COMMAND_ARGUMENT (ICLIARG, CLIARG, LCLIARG, ISTATCLI)
+         IF (ISTATCLI .NE. 0) THEN
+            WRITE (*, '(A,I3)')
+     1         'Error retrieving command-line argument ', ICLIARG
+            FLUSH(6)
+            STOP 1
+         END IF
+         IF (CLIARG(1:LCLIARG) .EQ. '-no-prior') THEN
+            IF (UsePrior_set_by_cli   .AND.
+     1          UsePrior .NE. USEPRIOR_NONE) THEN
+               WRITE (*, '(A)')
+     1            'Error: -no-prior and -first-prior are mutually'//
+     2            ' exclusive'
+               FLUSH(6)
+               STOP 1
+            END IF
+            UsePrior = USEPRIOR_NONE
+            UsePrior_set_by_cli = .true.
+         ELSE IF (CLIARG(1:LCLIARG) .EQ. '-first-prior') THEN
+            IF (UsePrior_set_by_cli   .AND.
+     1          UsePrior .NE. USEPRIOR_FIRST) THEN
+               WRITE (*, '(A)')
+     1            'Error: -no-prior and -first-prior are mutually'//
+     2            ' exclusive'
+               FLUSH(6)
+               STOP 1
+            END IF
+            UsePrior = USEPRIOR_FIRST
+            UsePrior_set_by_cli = .true.
+         ELSE
+            WRITE (*, '(A,A)') 'Error: unrecognized command-line ',
+     1                          'argument: '//CLIARG(1:LCLIARG)
+            FLUSH(6)
+            STOP 1
+         END IF
+ 45   CONTINUE
 C     -------------------------------------------------------------------------
 C     Get changes to Control Variables.
 C     -------------------------------------------------------------------------
@@ -404,7 +450,18 @@ C                 -------------------------------------------------------------
 C                 Final output.
 C                 -------------------------------------------------------------
                   CALL FINOUT ()
-                  if (.not.single_voxel) call update_priors ()
+                  if (.not.single_voxel) then
+                     if (UsePrior .eq. USEPRIOR_DEFAULT) then
+                        call update_priors ()
+                     else if (UsePrior .eq. USEPRIOR_FIRST   .and.
+     1                        .not.first_prior_done) then
+                        call update_priors ()
+                        degppm_frozen = degppm
+                        degzer_frozen = degzer
+                        first_prior_done = .true.
+                     end if
+c                    USEPRIOR_NONE: never call update_priors()
+                  end if
  130           continue
  120        continue
  110     continue
@@ -1643,8 +1700,19 @@ c             DEGPPM & DEGZER = 0 at the end of an analysis, because of calls
 c        to REPHAS.  So, if they are input, they must be restrored from 0,
 c        unless they are non-zero here, in which case they have been set in
 c        UPDATE_PRIORS for this analysis and should be left unchanged.
+c        UsePrior = USEPRIOR_FIRST: priors are frozen after voxel 1's one
+c        UPDATE_PRIORS call.  STARTV unconditionally zeroes DEGPPM/DEGZER
+c        every voxel regardless of mode, so the frozen values must be
+c        actively reapplied here every voxel from 2 onward -- skipping
+c        the near-zero check alone is NOT sufficient, since nothing else
+c        would rewrite them and they would silently stay at 0 from voxel
+c        3 onward.
 c        ---------------------------------------------------------------------
-         if (amax1(abs(degppm), abs(degzer)) .lt. 1.e-5) then
+         if (UsePrior .eq. USEPRIOR_FIRST   .and.   first_prior_done)
+     1      then
+            degppm = degppm_frozen
+            degzer = degzer_frozen
+         else if (amax1(abs(degppm), abs(degzer)) .lt. 1.e-5) then
             degppm = degppm_sav
             degzer = degzer_sav
          end if

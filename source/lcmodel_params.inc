@@ -28,3 +28,7 @@
      f           mmet_ratio=30, mchratio=1+(mchmet+1)*mmet_ratio,
      g           mchsimul=528, mvoxsk=64, mgap=10, mmdegp3=51,
      h           mchgam=16, mdwork_finout=2*msides+4+mnonl)
+      INTEGER USEPRIOR_DEFAULT, USEPRIOR_NONE, USEPRIOR_FIRST,
+     1        USEPRIOR_FILE
+      PARAMETER (USEPRIOR_DEFAULT=1, USEPRIOR_NONE=2,
+     1           USEPRIOR_FIRST=3, USEPRIOR_FILE=4)
