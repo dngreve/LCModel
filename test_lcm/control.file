@@ -6,4 +6,6 @@ hzpppm=127.786142
 filbas='3t.basis'
 filraw='data.raw'
 filps='out.ps'
+lcsv = 11
+filcsv = 'out.csv'
 $END

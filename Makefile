@@ -4,6 +4,11 @@ test_lcm/out.ps: binaries/linux/lcmodel
 	cd test_lcm && \
 	../binaries/linux/lcmodel < control.file
 
+test_lcm/out.csv: binaries/linux/lcmodel
+	cd test_lcm && \
+	../binaries/linux/lcmodel < control.file && \
+	diff test-reference-out.csv out.csv 
+
 test_lcm/multi-voxel/multi-voxel.csv: binaries/linux/lcmodel
 	cd test_lcm/multi-voxel && \
 	../../binaries/linux/lcmodel < control.file
