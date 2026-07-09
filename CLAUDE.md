@@ -56,7 +56,13 @@ This fork is a staged performance/architecture project on multi-voxel
 (MRSI-style) runs, in priority order. **Do the items in order** — later
 items depend on earlier ones being done safely.
 
-1. **✅ DONE — Stop re-reading the whole input file per ring.** Confirmed
+1. **✅ DONE — Stop re-reading the whole input file per ring** (see
+   "Per-ring I/O caching" below for full detail, including a resolved
+   incident worth reading: a deterministic `NaN`/crash was found and
+   root-caused post-implementation — a `COMMON`-block inconsistency
+   between `lcmodel.inc` and `LCModel.f`, not a flaw in the caching
+   design itself — fixed and independently re-verified). Original
+   diagnosis: this was
    via Claude Code trace (see "Per-voxel I/O caching" below for full
    detail): this was not a per-voxel re-read, it was a **per-ring**
    re-read. The scan pattern is an expanding square (Chebyshev distance
@@ -72,15 +78,187 @@ items depend on earlier ones being done safely.
    `MYDATA` with a `raw_cache_ok .and. iaverg .le. 0` guard, falling back
    to the original disk-read path otherwise. All regression tests pass;
    full closure detail in "Goal #1 implementation plan" below.
-2. **Option: derive priors from the first voxel only.** Add a control-file
-   option so that, instead of updating priors after every voxel (current
-   default behavior), priors are computed once from voxel 1 and reused
-   for all subsequent voxels. Must be opt-in — default behavior (rolling
-   per-voxel prior updates) has to stay bit-for-bit identical unless the
-   new option is explicitly set.
-3. **Option: derive priors from a voxel in a separate file.** Extend #2
-   so the reference voxel for priors can come from a different input
-   file than the one being fit, not just voxel 1 of the current file.
+2. **Options: control prior-update behavior via command-line flags.**
+   Revised design (supersedes the original control-file-keyword idea —
+   deliberate mechanism choice, see rationale below):
+   - New integer state variable **`UsePrior`** (not boolean — three
+     modes now, a fourth reserved for goal #3):
+     - `1` = **default** — update priors after every voxel (current,
+       unchanged behavior; must stay bit-for-bit identical when no flag
+       is given).
+     - `2` = **`-no-prior`** — never call `update_priors()`.
+     - `3` = **`-first-prior`** — call `update_priors()` once, at voxel 1
+       only, then never again (priors frozen after the first voxel).
+     - `4` = **reserved** for goal #3 (priors from a voxel in a separate
+       file) — not implemented yet, just don't collide with this number.
+   - Use named `PARAMETER` constants for these states (e.g.
+     `USEPRIOR_DEFAULT=1`, `USEPRIOR_NONE=2`, `USEPRIOR_FIRST=3`,
+     `USEPRIOR_FILE=4` reserved), not bare integer literals scattered
+     through the code.
+   - **If both `-no-prior` and `-first-prior` are given, error out** —
+     mutually exclusive, not "last one wins" or silently combined.
+   - **Mechanism: real command-line flags, parsed early in
+     `PROGRAM LCMODL` before the control file is read** — not a
+     control-file keyword. Deliberate choice: pure control-file
+     configuration is a real usability pain point, and CLI flags are
+     wanted as an extensible pattern for future options too.
+     `UsePrior` itself is a plain `INTEGER` (no `ALLOCATABLE` conflict
+     like `RAWCACHE` had), so it can live directly in an existing
+     `COMMON` block (e.g. `/BLINT/` in `lcmodel.inc`) — no module needed
+     for this one.
+   - **`GET_COMMAND_ARGUMENT` compile/runtime test — CONFIRMED, with one
+     real wrinkle found and fixed.** `gfortran -std=legacy -O3` accepts
+     `COMMAND_ARGUMENT_COUNT()`/`GET_COMMAND_ARGUMENT` cleanly in
+     fixed-form F77 — same pattern as goal #1's `ALLOCATABLE`/`MODULE`
+     check (modern intrinsics accepted under `-std=legacy` without
+     special handling). Runtime-tested all six cases: no args (default),
+     `-no-prior`, `-first-prior`, both together (error), an unrecognized
+     flag (error), and the same flag given twice (correctly *not* an
+     error — not a real conflict). **Wrinkle:** a bare `STOP 1` prints
+     gfortran's own `STOP 1` runtime annotation before the custom
+     `WRITE` error message appears (stdout buffering vs. the runtime's
+     termination message) — reads confusingly out of order. Bare `STOP`
+     avoids the noise but silently returns exit code 0, which is wrong
+     for a CLI validation error (a caller/script needs a nonzero exit to
+     detect failure). **Confirmed fix: explicit `FLUSH(6)` before
+     `STOP 1`** — correct message ordering and correct nonzero exit
+     code, confirmed together. Use this `WRITE`+`FLUSH(6)`+`STOP 1`
+     pattern for both the mutual-exclusivity and unrecognized-flag
+     errors. Nothing touched in the real source tree during this test —
+     scratchpad only.
+   - **`update_priors()` call site — CONFIRMED.** `source/LCModel.f:407`,
+     `if (.not.single_voxel) call update_priors ()`, gated by
+     `single_voxel` (set at line 271:
+     `single_voxel = max0(ndslic,ndrows,ndcols) .eq. 1`). The earlier
+     CLAUDE.md hint guessed this exact line/condition but hadn't
+     verified it — turned out correct, confirmed directly rather than
+     trusted.
+   - **A real `restore_settings()` bug found and fixed — the most
+     consequential finding for this goal.** `restore_settings()`
+     (line 324, once per voxel) decides keep-vs-restore `DEGPPM`/
+     `DEGZER` via a heuristic: near-zero means "restore saved defaults,"
+     non-zero means "`update_priors()` just ran, keep it." But this
+     signal is a one-shot echo, not a persistent flag — `STARTV` always
+     zeroes `DEGPPM`/`DEGZER` again after each voxel's `PHASTA()`
+     consumes them (confirmed sequence: `restore_settings()` [324] →
+     `STARTV`→`PHASTA` consumption of `EXDEGZ`/`EXDEGP` [line ~5911→
+     ~6744] → zeroing [~6110] → `update_priors()` [407] writes the next
+     voxel's values). Under default mode this is fine (`update_priors()`
+     refreshes the signal every voxel). **Under `-first-prior`, it
+     silently breaks from voxel 3 onward**: voxel 2 correctly gets
+     voxel-1's prior (the one-shot echo is still fresh), but voxel 2's
+     own `STARTV` zeroes it again, and since `update_priors()` never
+     fires a second time, voxel 3's `restore_settings()` sees near-zero
+     and silently reverts to control-file defaults — the opposite of
+     "frozen after voxel 1," for every voxel from 3 onward. **Fix:** a
+     new `first_prior_done` flag, set `.true.` the moment
+     `update_priors()` fires under `-first-prior` (only write site, at
+     line 407's new branch), wraps `restore_settings()`'s check so it's
+     skipped entirely once true — forcing "always keep" from that point
+     on. No-op for default/`-no-prior` (`first_prior_done` always
+     `.false.` there) — byte-identical behavior preserved for those
+     modes. **Verified orthogonal to `STARTV`'s internal `ipass=1`/
+     `ipass=2` mechanism** (its own private `_sav_startv` locals,
+     unrelated — `restore_settings()` runs exactly once per voxel,
+     before either `STARTV` call, never interacting with `STARTV`'s
+     internal repeat-pass handling).
+   - **`first_prior_done` persistence — verified, not assumed from
+     `raw_cache_ok`'s precedent.** Unlike `raw_cache_ok`
+     (module+`ALLOCATABLE`, genuine untested-territory needing an
+     empirical compile test), this is a plain `LOGICAL` in `COMMON` —
+     the same mechanism `voxel1`/`lraw_at_top`/`skip_voxel` already use
+     successfully. Still checked directly rather than assumed safe by
+     analogy: no name collision (`first_prior_done`/`useprior`,
+     case-insensitive grep, zero existing hits); initialization follows
+     `voxel1`'s convention (explicit runtime assignment near the top of
+     `PROGRAM LCMODL`, not `BLOCK DATA`); single write site (line 407's
+     new branch only); and `average()`'s `iaverg .ge. 1` path can't
+     reach that write site at all, since `average()` collapses
+     `ndslic`/`ndrows`/`ndcols` to 1 before `single_voxel` is computed —
+     making `single_voxel` true and skipping the entire gated block,
+     the same guarantee goal #1 relied on for the cache guard.
+   - **`ERRMES` confirmed unsuitable for CLI-parse-time errors — two
+     independent reasons.** (1) `LPRINT` defaults to 0 until `MYCONT()`
+     reads it from the control file; `ERRMES`'s diagnostic only prints
+     `IF (LPRINT .GT. 0)`, so called this early the message would be
+     silently swallowed. (2) More fundamentally: `EXITPS`'s actual
+     `STOP` statement is commented out project-wide
+     (`source/LCModel.f:~11061`, deliberately, so one bad voxel doesn't
+     kill a whole multi-voxel batch) — a "fatal" `ERRMES` call today
+     just prints "Error in voxel but continuing" and carries on. For a
+     CLI-parsing error that's exactly backwards; a hard stop is needed
+     before `MYCONT()`/the rest of the pipeline runs on unparsed or
+     contradictory flags. **Replacement:** plain `WRITE`+real `STOP`,
+     for both the mutual-exclusivity case and any unrecognized flag
+     (confirmed: unrecognized flags should hard-stop, not be silently
+     ignored, to catch typos immediately).
+   - **No regression baseline exists yet for the non-default modes.**
+     The default path (`UsePrior=1`, no flags) must still match all
+     three existing regression targets exactly. For `-no-prior` and
+     `-first-prior`, there is nothing to diff against yet — the first
+     correct, manually-reviewed run becomes the new committed baseline
+     (same pattern as "New reference outputs," below). Don't treat this
+     as done until that manual review has actually happened — it's not
+     just an implementation task, it's an open verification task too.
+   - **Forward-looking hook, deferred but cheap to add now:** there's no
+     control-file equivalent of `UsePrior` today, so there's no
+     CLI-vs-control-file override conflict to resolve yet — don't build
+     a general override/precedence mechanism now, it would be designing
+     for a hypothetical. **But** since CLI flags are parsed before the
+     control file is read, if a control-file `NAMELIST` field for this
+     setting is ever added later, an unconditional `NAMELIST` read would
+     silently clobber whatever the CLI flag set — an accidental
+     parsing-order bug, not a deliberate precedence choice. Cheap
+     insurance to add now, while this code is already being written:
+     also set a companion flag (e.g. `UsePrior_set_by_cli = .true.`)
+     recording that a CLI flag was explicitly given, not just what value
+     it produced. Costs one extra logical variable; gives a future
+     override rule ("if set via CLI, don't let the control file
+     overwrite it") something to check, instead of having to retrofit
+     "was this explicitly set via CLI" after the fact.
+   - **Design status: fully vetted, diffs reviewed, ready to apply.**
+     Every item confirmed, not assumed:
+     - Real call sites for both `update_priors()` (407) and
+       `restore_settings()` (324) — confirmed exactly one caller each,
+       no hidden third path (`average()` was a surprise third caller for
+       `MYDATA` in goal #1; swept for here too, came back clean).
+     - **`restore_settings()`'s freeze fix corrected during review** —
+       the first version only skipped the reset-to-defaults check, which
+       left `DEGPPM`/`DEGZER` at whatever `STARTV`'s per-voxel zeroing
+       had already set them to (i.e., silently 0 from voxel 3 onward,
+       not the frozen value — "worked" for voxel 2 only by coincidence
+       of timing). **Corrected:** capture `degppm_frozen`/
+       `degzer_frozen` at the moment `update_priors()` fires under
+       `-first-prior`, then have `restore_settings()` **actively
+       reassign** `degppm`/`degzer` from those frozen values every voxel
+       from 2 onward, not just skip a check. Default/`-no-prior` paths
+       remain byte-identical (`first_prior_done` never true there).
+     - `ERRMES` confirmed unsuitable; `WRITE`+`FLUSH(6)`+`STOP 1`
+       confirmed as the working replacement, including a
+       message-ordering wrinkle found and fixed (bare `STOP 1` prints
+       gfortran's own annotation out of order; `FLUSH(6)` first fixes
+       it while keeping the required nonzero exit code).
+     - `first_prior_done`/`UsePrior_set_by_cli` persistence verified
+       directly (no name collision, correct initialization convention,
+       single write site, unreachable from `average()`'s path).
+     - `USEPRIOR_*` constants corrected to explicit `INTEGER
+       PARAMETER`s — every existing constant in `lcmodel_params.inc`
+       starts with `M`/`m` (implicit-`INTEGER` range); `USEPRIOR_*`
+       would have been the first to break that convention and rely on
+       implicit-`REAL`-but-exactly-representable luck instead.
+     - Unit 6/stdout consistency and pre-`STOP` cleanliness (no open
+       files/allocated state before the CLI-parsing block, confirmed by
+       a full line-by-line read of `PROGRAM LCMODL` through `MYCONT()`)
+       both confirmed.
+     Nothing left unverified. Remaining work is execution: apply the
+     diffs, build, run the existing regression suite (must stay
+     unchanged for the default no-flags path), then manually run and
+     review `-no-prior`/`-first-prior` to establish their first
+     baselines.
+3. **Option: derive priors from a voxel in a separate file (`UsePrior=4`,
+   reserved).** Extend the above so the reference voxel for priors can
+   come from a different input file than the one being fit. Not
+   scoped/designed in detail yet — revisit when goal #2 is done.
 
 OpenMP parallelization is a possible future goal but is explicitly
 **out of scope for now** — don't introduce `!$OMP` directives, threading,
@@ -88,13 +266,18 @@ or thread-safety refactors unless asked. Keeping this out of scope
 simplifies #1–#3 considerably (no need to reason about concurrent access
 while restructuring the I/O and prior logic).
 
-- Constraints: preserve the existing default control-file behavior
-  exactly (regression tests must still match `out_ref_build.ps` byte-for-
-  byte where no new option is invoked); new options must be additive,
-  off by default.
+- Constraints: preserve the existing default behavior exactly
+  (regression tests must still match `test-reference-out.csv` and the
+  multi-voxel baselines byte-for-byte when no new CLI flag is given —
+  see the corrected single-voxel criterion in the Testing section
+  below; do not use `out_ref_build.ps` as the pass/fail check);
+  new flags must be additive, off by default (`UsePrior=1` unless a
+  flag says otherwise).
 - Definition of done per item: regression protocol below passes for the
-  default path, plus a new reference output is captured and reviewed for
-  each new opt-in mode (see "New reference outputs" below).
+  default path (no flags), plus a new reference output is captured and
+  manually reviewed for each new opt-in mode (`-no-prior`,
+  `-first-prior`) since none currently exists (see "New reference
+  outputs" below).
 
 ## Repository layout
 
@@ -128,8 +311,22 @@ output, not by unit tests in the usual sense. The Makefile provides
 three test targets (these are **file targets**, not phony names — invoke
 them by the output file path, using `-B` to force a rebuild if needed):
 
-- `make test_lcm/out.ps` — original single-voxel case, diffs against
-  `out_ref_build.ps`.
+- `make test_lcm/out.ps` (or the corresponding `.csv` target, once
+  wired in — see correction below) — original single-voxel case.
+  **⚠️ CORRECTED CRITERION — read before trusting any `out.ps` diff:**
+  `out_ref_build.ps` (upstream's checked-in reference) was discovered to
+  differ from this fork's own legitimate, pre-existing output for
+  reasons unrelated to any regression — it predates this fork's own
+  divergence from upstream, so diffing against it was never actually
+  the right test. **The correct baseline is this fork's own output at
+  commit `621487d`** (confirmed start-of-fork baseline, immediately
+  before `MODULE RAWCACHE`), captured as `test-reference-out.csv` via
+  the same control-file CSV-output option the multi-voxel tests use —
+  not a `.ps` diff, which also carries an unavoidable build-date
+  timestamp that makes a naive `diff` always show a difference even
+  with zero real change. The `.ps` output can still be generated as a
+  secondary human-readable sanity check, but it is **not the pass/fail
+  criterion** — the `.csv` diff against `test-reference-out.csv` is.
 - `make test_lcm/multi-voxel/multi-voxel.csv` — 100-voxel dataset,
   exercises the multi-voxel/multi-ring loop fully. Slower to run; use
   this before merging/finishing a change. Inputs: `multi-voxel.met`
@@ -155,13 +352,14 @@ For any change to `LCModel.f`:
 
 1. Build the binary (`make`).
 2. Run all three test targets.
-3. Diff each resulting output against its actual reference (`out.ps` vs
-   `out_ref_build.ps`; each `multi-voxel.csv` vs its own
-   `test-reference-multi-voxel.csv`).
-   - Expected differences: build date, version string (`6.3-N` vs `6.3-R`
-     style tags).
+3. Diff each resulting `.csv` output against its actual reference
+   (single-voxel `.csv` vs `test-reference-out.csv`; each
+   `multi-voxel.csv` vs its own `test-reference-multi-voxel.csv`).
+   **Do not rely on a raw `.ps` diff as the pass/fail signal** — see the
+   corrected criterion above.
    - Any difference in fitted concentrations, CRLBs, SNR, or plotted
      spectra is a regression unless the change was *intended* to alter
+     the algorithm — flag it explicitly, don't silently accept it.
      the algorithm — flag it explicitly, don't silently accept it.
 4. If the change is expected to alter numerical output (e.g. an
    intentional algorithm change), say so up front and show a before/after
@@ -173,10 +371,13 @@ coverage once the project grows.
 
 ### New reference outputs for this project
 
-Reference outputs for the single-voxel, `multi-voxel`, and
-`multi-voxel-10` cases already exist (`out_ref_build.ps` and each
-directory's `test-reference-multi-voxel.csv`) — use those as the
-baseline rather than generating new ones from scratch.
+Reference outputs for the single-voxel (`test-reference-out.csv`,
+generated from commit `621487d`, this fork's own confirmed baseline —
+**not** upstream's `out_ref_build.ps`, which was found to diverge from
+this fork for reasons unrelated to any regression), `multi-voxel`, and
+`multi-voxel-10` cases (each directory's `test-reference-multi-voxel.csv`)
+all exist — use those as the baseline rather than generating new ones
+from scratch.
 
 - For #2 and #3 (new prior-computation modes), generate and commit a new
   `test-reference-*.csv`-style baseline for each new option value the
@@ -436,7 +637,79 @@ sufficient). Nothing left to verify at the design level — remaining
 checkpoints are execution: the build gate, the regression protocol, and
 the two manual checks below.
 
-**GOAL #1 STATUS: DONE.** Implemented, correct, and regression-clean on
+**✅ INCIDENT RESOLVED — root cause found and fixed, re-verified clean.
+Read this before trusting "GOAL #1 STATUS: DONE" below; it explains why
+that status was briefly, genuinely wrong, and why it's now trustworthy
+again.**
+
+**What happened:** commit `9f7b9e8` (the goal #1 commit) turned out to
+be an **internally inconsistent snapshot** — `source/LCModel.f` at that
+commit already contained `MODULE RAWCACHE`/`check_zero_voxels`/`MYDATA`
+code that assumes `ivoxel` is a shared `/BLINT/` `COMMON` member, but
+the committed `source/lcmodel.inc` at that same commit did **not**
+actually contain `ivoxel` in `/BLINT/`'s member list. Silent Fortran
+fallback: with no matching `COMMON` declaration, `gfortran` gave
+`PROGRAM LCMODL` and `MYDATA` **two independent implicit-local**
+`ivoxel` variables instead of one shared one — no compile error, no
+warning. The main loop's real `ivoxel` (correctly `1`, for the
+single-voxel test) and `MYDATA`'s completely disconnected local
+`ivoxel` (uninitialized, containing stack garbage — confirmed via gdb:
+`1431020856`) were different memory locations entirely. `MYDATA` then
+indexed `datat_cache(1:NUNFIL, ivoxel)` — a 1-column array — with that
+garbage value, reading essentially random memory, which became `DATAT`,
+propagated through the entire fit, and surfaced as a deterministic
+`NaN` (same garbage value every run, since it was `COMMON`/BSS-adjacent
+memory, not stack noise) that crashed `CHREAL`'s axis-label formatting.
+
+**How it was found:** bisected between `621487d` (clean) and `9f7b9e8`
+(crashes) to confirm the bug was introduced by goal #1's changes; built
+a debug binary (`-g -O0 -fbacktrace -ffpe-trap=invalid,zero,overflow`)
+to get an exact crash location instead of tracing by hand; used gdb to
+compare `&ivoxel`'s actual memory address at the ring loop's call site
+vs. inside `MYDATA` — **different stack addresses** proved they weren't
+the same variable at all, which led directly to finding the missing
+`/BLINT/` member.
+
+**Why "regression-clean, all three tests pass, 9343-voxel validated"
+had been reported earlier despite this bug existing:** unresolved with
+certainty, but the most likely explanation, pieced together from the
+session: mid-session, an unrelated `git stash` (run during the
+`raw_cache_ok`-forcing bisection attempt for a *different* diagnostic
+purpose) was never popped, so several turns of "confirmed" debugging
+were actually run against **bare committed HEAD**, not the working
+tree's actual (correct) code — the stash, once recovered, was found to
+already contain the correct `ivoxel` `COMMON` member. The earlier
+"all three pass" report likely reflected a state that was never
+actually captured cleanly as its own commit before other edits and a
+stash operation overlapped it. **Lesson captured for this project:**
+after any `git stash`, verify `git status` shows a clean/expected state
+before trusting further test results — an un-popped stash makes "what
+you're testing" and "what you think you're testing" silently diverge,
+exactly as happened here.
+
+**Fix applied and independently re-verified, not just restored:**
+`ivoxel` correctly added to `/BLINT/` in `lcmodel.inc`. Verified via
+gdb: `&ivoxel` at both the ring loop and inside `MYDATA` now resolves to
+the **identical address**, reported by gdb as `<blint_+40836>` — an
+offset into the actual `/BLINT/` linker symbol, direct confirmation of
+real shared `COMMON` storage, not two disconnected locals. Value `= 1`
+at both breakpoints for the single-voxel test, matching expectation.
+Full clean rebuild performed (stale `.mod`/`.o`/binary deleted first).
+**All three regression targets re-run from scratch and confirmed
+passing** (single-voxel: `NaN`/crash gone, matched `out_ref_build.ps` at
+the time — **note:** `out_ref_build.ps` was itself later found to be
+the wrong baseline for this fork, see the corrected criterion in
+"Testing / regression protocol" above; the crash/`NaN` fix itself is
+unaffected by this — a crashing run and a clean run are distinguishable
+regardless of which reference file you diff against — but the "matches
+its reference exactly" framing at this point in the log used a
+reference that was subsequently replaced);
+both multi-voxel CSVs match their `test-reference-multi-voxel.csv`).
+
+**GOAL #1 STATUS: DONE — for real this time, independently re-verified
+after the above incident, not just restored from the original claim.**
+Implemented,
+correct, and regression-clean on
 all three test targets plus all required manual checks. Full closure:
 
 - **All three automated regression targets pass.** `out.ps` matches
