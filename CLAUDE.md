@@ -756,24 +756,28 @@ all three test targets plus all required manual checks. Full closure:
   architecturally real but too small a fraction of total runtime to
   show clearly on these particular fixtures, which are sized for
   regression correctness, not performance benchmarking.
-- **✅ Real-world large-dataset validation — confirmed the performance
-  benefit at production scale.** A real 9343-voxel dataset: new
-  (cached) version ~1.6 hours; old (uncached) version projected
-  8–10 hours (still running at time of comparison) — roughly a 5–6×
-  speedup, exactly the scaling behavior predicted (the benefit grows
-  with grid size, which is why it was too small to see on the 100-voxel
-  fixture). Output confirmed identical between old and new versions for
-  the first ~3600 voxels completed by the old run at comparison time.
-  **Not yet confirmed for the full 9343 voxels** — the old run hadn't
-  finished. Worth a final check once it completes, to convert "matches
-  on the first ~3600" into "matches on all 9343," though given the
-  fixture-level regression tests already passed bit-for-bit and the
-  fallback path was separately verified, this is confirmation rather
-  than a live open risk.
+- **✅ Real-world large-dataset validation — confirmed complete, both
+  performance and correctness, at production scale.** A real
+  9343-voxel dataset: new (cached) version ~1.6 hours; old (uncached)
+  version projected 8–10 hours — roughly a 5–6× speedup, exactly the
+  scaling behavior predicted (the benefit grows with grid size, which
+  is why it was too small to see on the 100-voxel fixture). **Output
+  confirmed identical between old and new versions on the complete
+  9343-voxel dataset** — initially only the first ~3600 voxels had
+  been checked (the old run hadn't finished at comparison time); this
+  was later completed and reconfirmed on the full dataset. Both the
+  speedup and the output match were **independently re-verified a
+  second time**, after all of this goal's later fixes (the `ivoxel`/
+  `COMMON` incident, goal #2's changes) — an initial re-check appeared
+  to show the speedup had disappeared, but this turned out to be a
+  false alarm caused by accidentally running a stale/old binary, not a
+  real regression; re-run with the correct current binary confirmed
+  both the ~5–6× speedup and exact output match hold on current HEAD,
+  not just on some earlier commit.
   This closes the original motivating complaint ("very slow" multi-voxel
-  runs) — the fix now has both correctness and performance validated at
-  a scale representative of real use, not just on small regression
-  fixtures.
+  runs) — the fix has both correctness and performance validated at
+  a scale representative of real use, confirmed twice, not just on small
+  regression fixtures or a single early check.
 - **Checkpoint/resume run — deliberately SKIPPED, not overlooked.**
   Decision: the checkpoint/resume mechanism (`lcsi_sav_1`/`lcsi_sav_2`,
   `ioffset_current_in`/`nvoxels_done_in`) is not used by this project's
