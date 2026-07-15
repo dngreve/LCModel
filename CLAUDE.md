@@ -114,7 +114,14 @@ below.)
    to the original disk-read path otherwise. All regression tests pass;
    full closure detail in "Goal #1 implementation plan" below.
 2. **Options: control prior-update behavior via command-line flags.**
-   Revised design (supersedes the original control-file-keyword idea —
+   **✅ `-no-prior`: DONE (committed). `-first-prior`: REMOVED, replaced
+   by `-prior-file`/`-save-prior` — see "Goal #2b" below, STATUS: DONE,
+   not yet committed.** The detail immediately below describes the
+   *original* `-first-prior` design, kept for historical record only —
+   `-first-prior` was dropped (it inherited a real semantic bug from
+   the ring-scan order, plus an administrative burden — a phantom
+   voxel that had to be tracked and excluded from CSV output).
+   Original design (supersedes the original control-file-keyword idea —
    deliberate mechanism choice, see rationale below):
    - New integer state variable **`UsePrior`** (not boolean — three
      modes now, a fourth reserved for goal #3):
@@ -122,16 +129,27 @@ below.)
        unchanged behavior; must stay bit-for-bit identical when no flag
        is given).
      - `2` = **`-no-prior`** — never call `update_priors()`.
-     - `3` = **`-first-prior`** — call `update_priors()` once, at voxel 1
-       only, then never again (priors frozen after the first voxel).
-     - `4` = **reserved** for goal #3 (priors from a voxel in a separate
-       file) — not implemented yet, just don't collide with this number.
+     - `3` = **`-first-prior` — DEPRECATED, being removed.** Originally:
+       call `update_priors()` once, at voxel 1 only, then never again.
+       **Problem discovered:** under the ring-scan order (see goal #1),
+       "voxel 1" for this purpose actually meant "the first voxel
+       *analyzed*," which is the scan-center voxel, not `ivoxel=1`
+       (the first file record) — the plain-language spec and the
+       actual mechanism silently disagreed. Separately, freezing a
+       prior from an in-map voxel created an administrative burden:
+       that voxel's row had to be identified and excluded from the
+       output CSV, since it isn't really "a voxel from the map." See
+       goal #2b below for the replacement.
+     - `4` = now used by **goal #2b** (external fixed prior via
+       `-prior-file`), not the original goal #3 (separate-file voxel
+       source, itself abandoned — see below).
    - Use named `PARAMETER` constants for these states (e.g.
-     `USEPRIOR_DEFAULT=1`, `USEPRIOR_NONE=2`, `USEPRIOR_FIRST=3`,
-     `USEPRIOR_FILE=4` reserved), not bare integer literals scattered
-     through the code.
-   - **If both `-no-prior` and `-first-prior` are given, error out** —
-     mutually exclusive, not "last one wins" or silently combined.
+     `USEPRIOR_DEFAULT=1`, `USEPRIOR_NONE=2`, `USEPRIOR_FIRST=3`
+     [being removed], `USEPRIOR_FILE=4` [now goal #2b]), not bare
+     integer literals scattered through the code.
+   - **If both `-no-prior` and `-prior-file` are given, error out** —
+     mutually exclusive, not "last one wins" or silently combined (same
+     rule that applied to `-no-prior`/`-first-prior`, carried forward).
    - **Mechanism: real command-line flags, parsed early in
      `PROGRAM LCMODL` before the control file is read** — not a
      control-file keyword. Deliberate choice: pure control-file
@@ -493,9 +511,259 @@ while restructuring the I/O and prior logic).
   flag says otherwise).
 - Definition of done per item: regression protocol below passes for the
   default path (no flags), plus a new reference output is captured and
-  manually reviewed for each new opt-in mode (`-no-prior`,
-  `-first-prior`) since none currently exists (see "New reference
-  outputs" below).
+  manually reviewed for each new opt-in mode (`-no-prior`, `-prior-file`
+  — not `-first-prior`, which is being removed) since none currently
+  exists (see "New reference outputs" below).
+
+## Goal #2b: external fixed-prior mechanism (replaces `-first-prior`)
+
+**What "priors" actually are, precisely** (worth stating plainly, since
+this wasn't fully nailed down before designing `-first-prior`): a small,
+fixed-size set of **phase-correction reference values**, not
+concentration priors:
+- `DEGPPM` — an expected frequency shift, in ppm.
+- `DEGZER` — an expected zero-order phase.
+- `SDDEGP`/`SDDEGZ` — standard deviations (uncertainty) around those two
+  expected values.
+- Possibly `DGPPMN`/`DGPPMX`/`SHIFMN`/`SHIFMX` — range bounds; **not yet
+  confirmed whether these are part of the same externalizable set or a
+  separate mechanism** — confirm before implementing.
+
+Used inside the fit (`PHASTA`, via `EXDEGZ`/`EXDEGP`) as a Bayesian-style
+anchor: the fit is penalized if its own phase/frequency estimate strays
+too far from these expected values, weighted by the uncertainty
+(`ABS(DEGPPM-EXDEGP) .GT. 4.*SDDEGP`-style check, confirmed during goal
+#1's `restore_settings()`/`PHASTA` trace).
+
+**Why the default mode's "voxel order" ever mattered, and why
+`-first-prior` was flawed:** the default mode isn't "use voxel 1's
+prior" — it's an **adaptive/rolling empirical-Bayes scheme**.
+`update_priors()` accumulates running sums/sums-of-squares (subroutine-
+local `SAVE` state) across every voxel processed *so far in this run*,
+continuously refining the mean/SD estimate. `-first-prior` froze that
+rolling process after its first update — which is exactly why it
+inherited the ring-scan-order ambiguity (see goal #2's entry above):
+"first" only meant anything because the *rolling* mechanism cares about
+processing order, and under ring-scan order, the first voxel actually
+*analyzed* is the scan-center voxel, not `ivoxel=1`. Separately,
+freezing an in-map voxel's prior meant that voxel's row had to be
+identified and excluded from the CSV output — an ongoing administrative
+burden with no clean fix that didn't touch scan order (a bigger,
+riskier change — see the ring-order/default-behavior discussion this
+session had, which was explicitly not undertaken because it would
+silently change default rolling-prior numerical output for every
+existing user, a serious reproducibility concern for scientific
+software).
+
+**New design — decided, not yet implemented:**
+- **Two-step external workflow, chosen deliberately over any in-map
+  voxel selection:**
+  1. Run LCModel once on a reference spectrum, single-voxel style,
+     letting the default (rolling) mechanism compute
+     `DEGPPM`/`DEGZER`/`SDDEGP`/`SDDEGZ` normally, as it already does.
+  2. Extract those final values from that run.
+  3. Feed them into the real map-analysis run via
+     **`-prior-file <file>`** — a new CLI flag reusing the freed
+     `UsePrior=4` slot (`USEPRIOR_FILE`) — which sets these values
+     once at startup and holds them **fixed for the entire run**: never
+     touched by `update_priors()`, never touched by `restore_settings()`'s
+     dynamic reset-to-zero-check logic.
+- **Two distinct flags, not one flag with dual read/write behavior** —
+  a single flag inferring direction from context (e.g. "does the file
+  already exist?") was considered and rejected as fragile/ambiguous:
+  - **`-prior-file <file>`** — read/apply direction. Sets
+    `DEGPPM`/`DEGZER`/etc. fixed for the whole run (`UsePrior=4`), as
+    described above.
+  - **`-save-prior <file>`** — new, write direction. After the run
+    computes its prior normally (default rolling mechanism, unaffected
+    otherwise), dump the final values to the named file, in the same
+    format `-prior-file` expects to read. Used in the *first* step of
+    the two-step workflow (running on the reference spectrum); not
+    mutually exclusive with anything else that flag's own run needs,
+    but see the two error conditions below.
+  - Nothing prevents combining both in one run in principle (e.g. "use
+    a fixed prior, but also re-log it for reproducibility") — not
+    restricted, though not the primary use case either.
+- **`-save-prior`'s mean/SD derivation — FINALIZED, via a dedicated
+  independent accumulator, not by touching `update_priors()`.** This
+  went through real back-and-forth (see the full reasoning trail
+  below if it needs re-deriving) — the final design:
+  - **Confirmed fact about `update_priors()` itself (worth recording
+    independent of this feature — affects understanding of *default*
+    behavior generally):** accumulation (`sum`/`sum2`/`nsamples`) is
+    **unconditional**, on every call. But *exposure* — writing the
+    computed mean/SD into `DEGPPM`/`DEGZER`/`SDDEGP`/`SDDEGZ`/etc. — is
+    gated behind `if (nsamples .lt. max0(2, mnsamp)) return`
+    (`mnsamp` defaults to `9`). Below that threshold, these `COMMON`
+    variables are untouched no-ops, silently retaining whatever they
+    held before (control-file default, or nothing). Once the gate
+    opens, **every subsequent call recomputes and overwrites them from
+    the full cumulative history** (an expanding-window mean/SD, not
+    compute-once) — this is a genuinely continuously-refining
+    empirical-Bayes scheme for the entire remainder of a default-mode
+    run, not just an initial warm-up. Practical implication: a small
+    multi-voxel dataset (e.g. `multi-voxel-10`, 10 voxels) barely
+    exceeds the default `mnsamp=9` threshold — most of a small run's
+    default-mode prior state is effectively frozen at its initial
+    value.
+  - This subroutine-local `SAVE` accumulation is invisible outside
+    `update_priors()` — there's no way for `-save-prior` to read
+    partial/below-threshold accumulated sums from it, even though the
+    *mean* formula itself has no mathematical degeneracy below
+    threshold (only the `/(n-1)` SD term does). Two ways to close this
+    gap were considered: modifying `update_priors()` to also expose
+    partial means below its own gate (rejected — touches shared
+    default-mode code for every user, disproportionate risk), vs. a
+    **separate, independent accumulator** used only when `-save-prior`
+    is active (**chosen**) — zero changes to `update_priors()`, zero
+    risk to default behavior.
+  - **Final logic**, mirroring `update_priors()`'s math in isolated
+    state, reusing `mnsamp`'s meaning for consistency:
+    - **`DEGZER`/`DEGPPM`**: always computed from whatever's
+      accumulated so far by the independent accumulator, even from a
+      single voxel — no gate, since the mean has no n=1 degeneracy.
+    - **`SDDEGP`/`SDDEGZ`**: computed from the accumulator's own sums
+      **only if** `nsamples .ge. max0(2, mnsamp)` (reusing `mnsamp`,
+      not an independently-configurable threshold — decided for
+      consistency of meaning across the program); **otherwise, fall
+      back to the control file's static default `SDDEGP`/`SDDEGZ`**
+      values — matching the paper's own convention (Provencher 1993)
+      of using a fixed, non-data-derived default when there isn't
+      enough data for a real variance estimate.
+  - Works uniformly for single-voxel *and* multi-voxel reference runs
+    — supersedes the earlier, now-obsolete "restrict to single-voxel
+    only" idea. A single voxel just means the accumulator has
+    `nsamples=1`: mean from that one value, SD from the control-file
+    default (below `mnsamp`'s floor of `max0(2,...)=2`, so always
+    true for n=1 regardless of `mnsamp`'s setting).
+  - **Not yet designed**: exactly where in the per-voxel flow this new
+    accumulator hooks in (presumably alongside wherever `update_priors()`
+    itself gets called, but as a fully separate call/state — not a
+    modification to that subroutine), and confirming `PHITOT`'s role
+    as the correct per-voxel input value in a multi-voxel context too,
+    not just the single-voxel case already traced.
+- **One error condition still applies:** **`-save-prior` combined with
+  `-no-prior` → error.** Under `-no-prior`, nothing resembling a fit
+  result worth saving is being computed in the intended sense — error
+  out rather than silently saving something meaningless. (The earlier
+  "restrict to single-voxel, error on multi-voxel" condition is
+  superseded by the hybrid design above and no longer applies.)
+- **`-prior-file`/`-save-prior`'s shared format: a single small text
+  file** (decided over individual per-value CLI flags) — simple
+  `key=value` lines expected (e.g. `degppm=0.05`, `degzer=12.3`,
+  `sddegp=...`, `sddegz=...`); exact format/parsing approach, and the
+  final variable list (see open item 1 below), not yet designed in
+  detail.
+- **Mutual exclusivity carried forward**: `-no-prior` and `-prior-file`
+  together should still error, same pattern as the old `-no-prior`/
+  `-first-prior` rule.
+
+**Open investigation items — Plan mode, not yet resolved:**
+1. Confirm the exact, complete list of variables that constitute "the
+   prior" — is it just `DEGPPM`/`DEGZER`/`SDDEGP`/`SDDEGZ`, or do
+   `DGPPMN`/`DGPPMX`/`SHIFMN`/`SHIFMX` also need externalizing? Trace
+   `update_priors()`/`restore_settings()` precisely, don't assume from
+   the goal #1-era trace summary alone. This list determines both
+   `-prior-file`'s required fields and what `-save-prior` needs to
+   write. **Partially informed by the finalized mean/SD design above**
+   — `DGPPMN`/`DGPPMX`/`SHIFMN`/`SHIFMX` weren't addressed by that
+   design and still need their own sourcing decided (control-file
+   passthrough, like the SD fallback? Or something else?).
+2. **Is a new "dump priors" feature (`-save-prior`'s core mechanism)
+   genuinely new code, or can it reuse/adapt something that already
+   prints these values somewhere** (a coord file, the `.ps`, stdout)?
+   Check the actual existing output before assuming either way — if
+   nothing already surfaces these values, `-save-prior`'s write logic
+   is new code, not a small wrapper around existing output. **Note:**
+   given the new independent-accumulator design, the values to write
+   won't be sitting in `update_priors()`'s output `COMMON` variables at
+   all in the below-threshold case — they'll be in the new
+   accumulator's own state — so this write logic needs to read from
+   wherever that new state lives, not just from `DEGPPM`/`DEGZER`.
+3. Design the `-prior-file`/`-save-prior` parsing (format, required vs.
+   optional fields, error behavior on malformed/missing fields) and the
+   `restore_settings()` branch for `UsePrior=4` (analogous in spirit to
+   the old `first_prior_done` wrapper, but simpler — no need to capture
+   anything mid-run, just read once at start and hold fixed every
+   voxel).
+4. Confirm removing `-first-prior`'s code doesn't leave any dangling
+   references (call-site sweep, same rigor as before) — `UsePrior`
+   comparisons elsewhere in the file that check `.eq. USEPRIOR_FIRST`
+   need finding and removing/updating, not just the CLI branch and the
+   `restore_settings()` wrapper.
+5. **Design the new independent accumulator itself**: where it hooks
+   into the per-voxel flow (alongside wherever `update_priors()` is
+   normally called, but as fully separate state — not a modification to
+   that subroutine), what per-voxel value(s) it accumulates (`PHITOT`
+   confirmed correct for the single-voxel case — confirm it's also the
+   correct per-voxel input in a multi-voxel context, not just assumed
+   to carry over), and where its final state gets read at end-of-run
+   for `-save-prior`'s write.
+
+**GOAL #2b STATUS: DONE.** Diffs applied, clean build (17 pre-existing
+unrelated warnings only), `-first-prior` fully removed (case-insensitive
+sweep confirms zero remaining references except the intentionally-kept
+`PARAMETER`), all three existing regression baselines still pass
+byte-for-byte with no new flags. Full closure:
+
+- **A real numerical bug caught and fixed during diff review, before
+  applying anything**: the first drafted end-of-run write for
+  `-save-prior` mirrored `update_priors()`'s raw SD formulas but
+  omitted its final clamps (`sddegp = amin1(sddegp_input,
+  amax1(sd(2), sddegp_min))`, `sddegz = amax1(sd(1), sddegz_min)`,
+  with `sddegp_min=1.0`/`sddegz_min=3.0`). Caught by comparing the new
+  code line-by-line against `update_priors()`'s actual source rather
+  than accepting "mirrors the formula" at face value — fixed by
+  duplicating the two floor/ceiling literals (same accepted
+  manual-sync tradeoff as the `msamples=4096` cap and `MCHFMT`/`MCHID`
+  in earlier goals).
+- **Both mutual-exclusivity checks verified order-independent**, traced
+  through actual variable states for both orderings, not asserted from
+  symmetry of form: `-no-prior`/`-prior-file` and `-save-prior`/
+  `-no-prior` each fire correctly regardless of which flag appears
+  first on the command line.
+- **Unit-14 collision guard verified to actually fire** (`LCOORD=14`
+  test case), same pattern as goal #3's `LCSV=11` guard.
+- **`-save-prior` cross-verified against an independent computation
+  path, not just "ran successfully"**: single-voxel test's written
+  `degzer`/`degppm` matched the `.ps` output's own "Ph:" annotation
+  exactly. Multi-voxel-10 test (10 voxels, above the `mnsamp=9`
+  threshold) confirmed the threshold-gated real-SD path genuinely
+  fires (data-derived `sddegz`, distinct from the below-threshold
+  fallback case).
+- **A dataset-specific zero explained and independently confirmed, not
+  just observed and accepted**: `degppm=0`/`sddegp=0` in the
+  multi-voxel-10 output are zero for two genuinely different reasons —
+  `sddegp` because the clamp correctly mirrors `update_priors()`'s own
+  ceiling against this control file's `SDDEGP=0` setting; `degppm`
+  because `PHITOT(2)` is a hard structural zero for every voxel of
+  this specific dataset (confirmed by instrumenting unmodified
+  default-mode execution — `EXDEGP=0` forces `PHASTA`'s anchor
+  uncertainty budget to `4*SDDEGP=0`, so `DEGPPM` never moves off its
+  starting point, for any voxel, independent of anything added by this
+  goal). Not the same explanation reused for two different variables.
+- **`-prior-file`'s mechanism verified end-to-end, not just
+  parse-tested**: ran the same multi-voxel-10 dataset with two
+  meaningfully different prior files; fitted `DEGPPM`/`DEGZER`
+  genuinely shifted toward whichever prior was supplied — a
+  substantial, consistent, directionally-correct response, not
+  identical output regardless of input. This is the test that would
+  have caught a bug where the file parses correctly but the fixed
+  values never actually reach `PHASTA`.
+- **Debug instrumentation added mid-investigation was fully removed and
+  re-verified** — confirmed via grep (zero remaining debug identifiers)
+  and a full rebuild + re-run of all three regression baselines after
+  removal, not just assumed clean.
+- **Not yet tested, deferred explicitly (not silently skipped), same
+  pattern as goal #1's checkpoint/resume**: the `msamples=4096` cap and
+  its one-shot warning. No >4096-voxel fixture exists in this repo; a
+  synthetic test (temporarily lowering the duplicated cap literal,
+  running the 100-voxel `multi-voxel` dataset, confirming the warning
+  fires exactly once, then reverting the literal) is cheap and
+  available if this ever needs closing out — lower priority than
+  everything above since it doesn't affect either flag's core
+  correctness, just the cap's own warning path.
+- **Not yet committed as of this writing.**
 
 ## Repository layout
 

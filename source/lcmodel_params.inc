@@ -30,5 +30,8 @@
      h           mchgam=16, mdwork_finout=2*msides+4+mnonl)
       INTEGER USEPRIOR_DEFAULT, USEPRIOR_NONE, USEPRIOR_FIRST,
      1        USEPRIOR_FILE
+C     USEPRIOR_FIRST=3 is no longer used (the -first-prior CLI flag was
+C       removed, replaced by -prior-file/-save-prior) -- left defined,
+C       unused, to avoid renumbering USEPRIOR_FILE.
       PARAMETER (USEPRIOR_DEFAULT=1, USEPRIOR_NONE=2,
      1           USEPRIOR_FIRST=3, USEPRIOR_FILE=4)

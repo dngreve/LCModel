@@ -180,6 +180,11 @@ c
       external ilen
       logical iok
       CHARACTER CLIARG*64
+      CHARACTER PRIORLIN*132, PRIORKEY*10
+      LOGICAL GOT_DEGPPM, GOT_DEGZER, GOT_SDDEGP, GOT_SDDEGZ
+      INTEGER SAVE_PRIOR_J
+      REAL DEGPPM_CAPTURED, DEGZER_CAPTURED, SDDEGP_CAPTURED,
+     1     SDDEGZ_CAPTURED, SAVE_PRIOR_SUM2Z, SAVE_PRIOR_TERM
       data nanalyses_done/0/, nvoxels_done/0/, nvoxels_done_in/0/
       chsubp = 'MAIN'
       version_lcm = '6.3-1N'
@@ -193,7 +198,9 @@ C       file is read (CALL MYCONT, below).
 C     -------------------------------------------------------------------------
       UsePrior = USEPRIOR_DEFAULT
       UsePrior_set_by_cli = .false.
-      first_prior_done = .false.
+      prior_file_set_by_cli = .false.
+      save_prior_set_by_cli = .false.
+      save_prior_cap_warned = .false.
       filraw_set_by_cli = .false.
       filh2o_set_by_cli = .false.
       csv_set_by_cli = .false.
@@ -211,7 +218,7 @@ C     -------------------------------------------------------------------------
             IF (UsePrior_set_by_cli   .AND.
      1          UsePrior .NE. USEPRIOR_NONE) THEN
                WRITE (*, '(A)')
-     1            'Error: -no-prior and -first-prior are mutually'//
+     1            'Error: -no-prior and -prior-file are mutually'//
      2            ' exclusive'
                FLUSH(6)
                STOP 1
@@ -219,18 +226,33 @@ C     -------------------------------------------------------------------------
             UsePrior = USEPRIOR_NONE
             UsePrior_set_by_cli = .true.
             ICLIARG = ICLIARG + 1
-         ELSE IF (CLIARG(1:LCLIARG) .EQ. '-first-prior') THEN
+         ELSE IF (CLIARG(1:LCLIARG) .EQ. '-prior-file') THEN
             IF (UsePrior_set_by_cli   .AND.
-     1          UsePrior .NE. USEPRIOR_FIRST) THEN
+     1          UsePrior .NE. USEPRIOR_FILE) THEN
                WRITE (*, '(A)')
-     1            'Error: -no-prior and -first-prior are mutually'//
+     1            'Error: -no-prior and -prior-file are mutually'//
      2            ' exclusive'
                FLUSH(6)
                STOP 1
             END IF
-            UsePrior = USEPRIOR_FIRST
+            IF (ICLIARG + 1 .GT. NCLIARGS) THEN
+               WRITE (*, '(A)') 'Error: -prior-file requires a path'
+               FLUSH(6)
+               STOP 1
+            END IF
+            CALL GET_COMMAND_ARGUMENT (ICLIARG+1, prior_file_cli,
+     1                                  LCLIVAL, ISTATCLI)
+            IF (ISTATCLI .NE. 0) THEN
+               WRITE (*, '(A,I5,A)')
+     1            'Error: -prior-file path is ', LCLIVAL,
+     2            ' characters, exceeding the 255-character limit'
+               FLUSH(6)
+               STOP 1
+            END IF
+            UsePrior = USEPRIOR_FILE
             UsePrior_set_by_cli = .true.
-            ICLIARG = ICLIARG + 1
+            prior_file_set_by_cli = .true.
+            ICLIARG = ICLIARG + 2
          ELSE IF (CLIARG(1:LCLIARG) .EQ. '-i') THEN
             IF (ICLIARG + 2 .GT. NCLIARGS) THEN
                WRITE (*, '(A)')
@@ -277,6 +299,23 @@ C     -------------------------------------------------------------------------
             END IF
             csv_set_by_cli = .true.
             ICLIARG = ICLIARG + 2
+         ELSE IF (CLIARG(1:LCLIARG) .EQ. '-save-prior') THEN
+            IF (ICLIARG + 1 .GT. NCLIARGS) THEN
+               WRITE (*, '(A)') 'Error: -save-prior requires a path'
+               FLUSH(6)
+               STOP 1
+            END IF
+            CALL GET_COMMAND_ARGUMENT (ICLIARG+1, save_prior_file_cli,
+     1                                  LCLIVAL, ISTATCLI)
+            IF (ISTATCLI .NE. 0) THEN
+               WRITE (*, '(A,I5,A)')
+     1            'Error: -save-prior path is ', LCLIVAL,
+     2            ' characters, exceeding the 255-character limit'
+               FLUSH(6)
+               STOP 1
+            END IF
+            save_prior_set_by_cli = .true.
+            ICLIARG = ICLIARG + 2
          ELSE
             WRITE (*, '(A,A)') 'Error: unrecognized command-line ',
      1                          'argument: '//CLIARG(1:LCLIARG)
@@ -285,6 +324,13 @@ C     -------------------------------------------------------------------------
          END IF
          GO TO 45
  46   CONTINUE
+      IF (save_prior_set_by_cli   .AND.   UsePrior .EQ. USEPRIOR_NONE)
+     1   THEN
+         WRITE (*, '(A)')
+     1      'Error: -save-prior and -no-prior are mutually exclusive'
+         FLUSH(6)
+         STOP 1
+      END IF
 C     -------------------------------------------------------------------------
 C     Get changes to Control Variables.
 C     -------------------------------------------------------------------------
@@ -368,6 +414,130 @@ C        ----------------------------------------------------------------------
          END IF
          FILCSV = filcsv_cli
          LCSV = 11
+      END IF
+      IF (prior_file_set_by_cli   .OR.   save_prior_set_by_cli) THEN
+C        ----------------------------------------------------------------------
+C        Collision guard for unit 14, shared sequentially by -prior-file's
+C          read and -save-prior's write (never open simultaneously).  Same
+C          failure class, same 9-variable sweep, as -csv's LCSV=11 guard
+C          above (LBASIS, LCOORD, lcoraw, LH2O, LPRINT, LPS, LRAW, LTABLE,
+C          plus LCSV itself here, since -csv may have already forced it to
+C          a different value).
+C        ----------------------------------------------------------------------
+         IF (LBASIS .EQ. 14) THEN
+            WRITE (*, '(A)') 'Error: -prior-file/-save-prior '//
+     1         'require Fortran unit 14, but the control file '//
+     2         'already assigns unit 14 to LBASIS.  Change one of '//
+     3         'these settings.'
+            FLUSH(6)
+            STOP 1
+         ELSE IF (LCOORD .EQ. 14) THEN
+            WRITE (*, '(A)') 'Error: -prior-file/-save-prior '//
+     1         'require Fortran unit 14, but the control file '//
+     2         'already assigns unit 14 to LCOORD.  Change one of '//
+     3         'these settings.'
+            FLUSH(6)
+            STOP 1
+         ELSE IF (lcoraw .EQ. 14) THEN
+            WRITE (*, '(A)') 'Error: -prior-file/-save-prior '//
+     1         'require Fortran unit 14, but the control file '//
+     2         'already assigns unit 14 to lcoraw.  Change one of '//
+     3         'these settings.'
+            FLUSH(6)
+            STOP 1
+         ELSE IF (LCSV .EQ. 14) THEN
+            WRITE (*, '(A)') 'Error: -prior-file/-save-prior '//
+     1         'require Fortran unit 14, but LCSV is already 14 '//
+     2         '(control file or -csv).  Change one of these '//
+     3         'settings.'
+            FLUSH(6)
+            STOP 1
+         ELSE IF (LH2O .EQ. 14) THEN
+            WRITE (*, '(A)') 'Error: -prior-file/-save-prior '//
+     1         'require Fortran unit 14, but the control file '//
+     2         'already assigns unit 14 to LH2O.  Change one of '//
+     3         'these settings.'
+            FLUSH(6)
+            STOP 1
+         ELSE IF (LPRINT .EQ. 14) THEN
+            WRITE (*, '(A)') 'Error: -prior-file/-save-prior '//
+     1         'require Fortran unit 14, but the control file '//
+     2         'already assigns unit 14 to LPRINT.  Change one of '//
+     3         'these settings.'
+            FLUSH(6)
+            STOP 1
+         ELSE IF (LPS .EQ. 14) THEN
+            WRITE (*, '(A)') 'Error: -prior-file/-save-prior '//
+     1         'require Fortran unit 14, but the control file '//
+     2         'already assigns unit 14 to LPS.  Change one of '//
+     3         'these settings.'
+            FLUSH(6)
+            STOP 1
+         ELSE IF (LRAW .EQ. 14) THEN
+            WRITE (*, '(A)') 'Error: -prior-file/-save-prior '//
+     1         'require Fortran unit 14, but the control file '//
+     2         'already assigns unit 14 to LRAW.  Change one of '//
+     3         'these settings.'
+            FLUSH(6)
+            STOP 1
+         ELSE IF (LTABLE .EQ. 14) THEN
+            WRITE (*, '(A)') 'Error: -prior-file/-save-prior '//
+     1         'require Fortran unit 14, but the control file '//
+     2         'already assigns unit 14 to LTABLE.  Change one of '//
+     3         'these settings.'
+            FLUSH(6)
+            STOP 1
+         END IF
+      END IF
+      IF (prior_file_set_by_cli) THEN
+C        ----------------------------------------------------------------------
+C        Read the fixed prior: plain key=value lines, degppm/degzer/
+C          sddegp/sddegz, order-independent, all four required, lowercase
+C          keys only (new file format, under our own control -- no case
+C          folding needed).  Held fixed for the whole run via
+C          restore_settings()'s UsePrior=USEPRIOR_FILE branch.
+C        ----------------------------------------------------------------------
+         OPEN (14, FILE=prior_file_cli, STATUS='OLD', ERR=850)
+         GOT_DEGPPM = .FALSE.
+         GOT_DEGZER = .FALSE.
+         GOT_SDDEGP = .FALSE.
+         GOT_SDDEGZ = .FALSE.
+ 851     READ (14, '(A)', END=852) PRIORLIN
+         IEQ = INDEX(PRIORLIN, '=')
+         IF (IEQ .LE. 1) GO TO 851
+         PRIORKEY = PRIORLIN(1:IEQ-1)
+         IF (PRIORKEY .EQ. 'degppm') THEN
+            READ (PRIORLIN(IEQ+1:), *, ERR=853) degppm_fixed
+            GOT_DEGPPM = .TRUE.
+         ELSE IF (PRIORKEY .EQ. 'degzer') THEN
+            READ (PRIORLIN(IEQ+1:), *, ERR=853) degzer_fixed
+            GOT_DEGZER = .TRUE.
+         ELSE IF (PRIORKEY .EQ. 'sddegp') THEN
+            READ (PRIORLIN(IEQ+1:), *, ERR=853) sddegp_fixed
+            GOT_SDDEGP = .TRUE.
+         ELSE IF (PRIORKEY .EQ. 'sddegz') THEN
+            READ (PRIORLIN(IEQ+1:), *, ERR=853) sddegz_fixed
+            GOT_SDDEGZ = .TRUE.
+         END IF
+         GO TO 851
+ 852     CLOSE (14)
+         IF (.NOT.(GOT_DEGPPM .AND. GOT_DEGZER .AND.
+     1             GOT_SDDEGP .AND. GOT_SDDEGZ)) THEN
+            WRITE (*, '(A)') 'Error: -prior-file is missing one or '//
+     1         'more required keys (degppm, degzer, sddegp, sddegz)'
+            FLUSH(6)
+            STOP 1
+         END IF
+         GO TO 854
+ 850     WRITE (*, '(A)') 'Error: could not open -prior-file: '//
+     1      prior_file_cli
+         FLUSH(6)
+         STOP 1
+ 853     WRITE (*, '(A)') 'Error: -prior-file has an unparseable '//
+     1      'value on line: '//PRIORLIN
+         FLUSH(6)
+         STOP 1
+ 854     CONTINUE
       END IF
 C     -------------------------------------------------------------------------
 C     Validate the truly-final FILRAW state (post-CLI-reapply,
@@ -595,23 +765,92 @@ C                 -------------------------------------------------------------
 C                 Final output.
 C                 -------------------------------------------------------------
                   CALL FINOUT ()
+                  IF (save_prior_set_by_cli) THEN
+                     IF (save_prior_nsamples .LT. 4096) THEN
+                        save_prior_nsamples = save_prior_nsamples + 1
+                        save_prior_sum_degppm = save_prior_sum_degppm +
+     1                     phitot(2)
+                        save_prior_sum2_degppm =
+     1                     save_prior_sum2_degppm + phitot(2)**2
+                        save_prior_degzer_sample(save_prior_nsamples) =
+     1                     phitot(1)
+                        save_prior_sum_cos = save_prior_sum_cos +
+     1                     cos(radian * phitot(1))
+                        save_prior_sum_sin = save_prior_sum_sin +
+     1                     sin(radian * phitot(1))
+                     ELSE IF (.NOT.save_prior_cap_warned) THEN
+                        save_prior_cap_warned = .TRUE.
+                        WRITE (*, '(A)') 'Warning: -save-prior '//
+     1                     'reference run exceeded 4096 voxels; '//
+     2                     'only the first 4096 were used to '//
+     3                     'compute the saved prior.'
+                     END IF
+                  END IF
                   if (.not.single_voxel) then
                      if (UsePrior .eq. USEPRIOR_DEFAULT) then
                         call update_priors ()
-                     else if (UsePrior .eq. USEPRIOR_FIRST   .and.
-     1                        .not.first_prior_done) then
-                        call update_priors ()
-                        degppm_frozen = degppm
-                        degzer_frozen = degzer
-                        first_prior_done = .true.
                      end if
-c                    USEPRIOR_NONE: never call update_priors()
+c                    USEPRIOR_NONE, USEPRIOR_FILE: never call
+c                    update_priors() -- USEPRIOR_FILE's prior comes from
+c                    -prior-file and is held fixed by restore_settings(),
+c                    never updated from data.
                   end if
  130           continue
  120        continue
  110     continue
  100  continue
       if (lcsv .gt. 0) close (lcsv)
+      IF (save_prior_set_by_cli) THEN
+         DEGPPM_CAPTURED = save_prior_sum_degppm /
+     1                     float(save_prior_nsamples)
+         DEGZER_CAPTURED = atan2(save_prior_sum_sin,
+     1                           save_prior_sum_cos) / radian
+         if (DEGZER_CAPTURED .lt. 0.) DEGZER_CAPTURED =
+     1      DEGZER_CAPTURED + 360.
+         IF (save_prior_nsamples .GE. MAX0(2, mnsamp)) THEN
+C           -------------------------------------------------------------
+C           1.0 and 3.0 mirror update_priors()'s own sddegp_min/
+C             sddegz_min (LCModel.f:1922-area, subroutine-local SAVE/DATA,
+C             not COMMON, so not directly referenceable here) --
+C             duplicated literals, same accepted manual-sync tradeoff as
+C             the msamples=4096 cap above.
+C           -------------------------------------------------------------
+            SDDEGP_CAPTURED = amin1(sddegp_input, amax1(
+     1         rsdsam(2) * sqrt(amax1(0.,
+     2            (save_prior_sum2_degppm - DEGPPM_CAPTURED**2 *
+     3             float(save_prior_nsamples)) /
+     4             float(save_prior_nsamples - 1))),
+     5         1.0))
+            SAVE_PRIOR_SUM2Z = 0.
+            do 861 SAVE_PRIOR_J = 1, save_prior_nsamples
+               SAVE_PRIOR_TERM =
+     1            save_prior_degzer_sample(SAVE_PRIOR_J) -
+     2            DEGZER_CAPTURED
+               SAVE_PRIOR_SUM2Z = SAVE_PRIOR_SUM2Z +
+     1            amin1(abs(SAVE_PRIOR_TERM),
+     2                  abs(SAVE_PRIOR_TERM + 360.),
+     3                  abs(SAVE_PRIOR_TERM - 360.))**2
+ 861        continue
+            SDDEGZ_CAPTURED = amax1(rsdsam(3) * sqrt(SAVE_PRIOR_SUM2Z /
+     1                        float(save_prior_nsamples - 1)), 3.0)
+         ELSE
+            SDDEGP_CAPTURED = sddegp
+            SDDEGZ_CAPTURED = sddegz
+         END IF
+         OPEN (14, FILE=save_prior_file_cli, STATUS='UNKNOWN',
+     1         ERR=862)
+         WRITE (14, '(A,1PE16.6)') 'degppm=', DEGPPM_CAPTURED
+         WRITE (14, '(A,1PE16.6)') 'degzer=', DEGZER_CAPTURED
+         WRITE (14, '(A,1PE16.6)') 'sddegp=', SDDEGP_CAPTURED
+         WRITE (14, '(A,1PE16.6)') 'sddegz=', SDDEGZ_CAPTURED
+         CLOSE (14)
+         GO TO 863
+ 862     WRITE (*, '(A)') 'Error: could not open -save-prior output '//
+     1      'file: '//save_prior_file_cli
+         FLUSH(6)
+         STOP 1
+ 863     CONTINUE
+      END IF
       if (lcsi_sav_1 .eq. 12) then
          rewind 12
          nanalyses_done = 0
@@ -1845,19 +2084,8 @@ c             DEGPPM & DEGZER = 0 at the end of an analysis, because of calls
 c        to REPHAS.  So, if they are input, they must be restrored from 0,
 c        unless they are non-zero here, in which case they have been set in
 c        UPDATE_PRIORS for this analysis and should be left unchanged.
-c        UsePrior = USEPRIOR_FIRST: priors are frozen after voxel 1's one
-c        UPDATE_PRIORS call.  STARTV unconditionally zeroes DEGPPM/DEGZER
-c        every voxel regardless of mode, so the frozen values must be
-c        actively reapplied here every voxel from 2 onward -- skipping
-c        the near-zero check alone is NOT sufficient, since nothing else
-c        would rewrite them and they would silently stay at 0 from voxel
-c        3 onward.
 c        ---------------------------------------------------------------------
-         if (UsePrior .eq. USEPRIOR_FIRST   .and.   first_prior_done)
-     1      then
-            degppm = degppm_frozen
-            degzer = degzer_frozen
-         else if (amax1(abs(degppm), abs(degzer)) .lt. 1.e-5) then
+         if (amax1(abs(degppm), abs(degzer)) .lt. 1.e-5) then
             degppm = degppm_sav
             degzer = degzer_sav
          end if
@@ -1894,6 +2122,26 @@ c         lwfft = lwfft_sav
             nerror(j) = 0
  230     continue
          title = title_sav
+      end if
+C     -------------------------------------------------------------------------
+C     UsePrior = USEPRIOR_FILE: hold DEGPPM/DEGZER/SDDEGP/SDDEGZ fixed at
+C       the values read from -prior-file, every voxel including voxel 1
+C       (unlike the old USEPRIOR_FIRST freeze, whose values came FROM
+C       voxel 1 and so could only apply from voxel 2 onward, these are
+C       known before voxel 1 starts).  Applied unconditionally, after the
+C       voxel1/else split above, overriding whatever either branch just
+C       did.  SDDEGP/SDDEGZ reapplied too, not just DEGPPM/DEGZER --
+C       closes a drift gap the old mechanism had: SDDEGZ has one-shot
+C       mutation sites outside update_priors() (MYDATA's doecc_active-
+C       gated rescale, PHASE_WITH_MAX_REAL's one-time doubling) that
+C       would otherwise silently drift it away from the fixed value
+C       partway through a multi-voxel run.
+C     -------------------------------------------------------------------------
+      if (UsePrior .eq. USEPRIOR_FILE) then
+         degppm = degppm_fixed
+         degzer = degzer_fixed
+         sddegp = sddegp_fixed
+         sddegz = sddegz_fixed
       end if
       area_met_norm = 0.
       istago = 0
