@@ -194,8 +194,12 @@ C     -------------------------------------------------------------------------
       UsePrior = USEPRIOR_DEFAULT
       UsePrior_set_by_cli = .false.
       first_prior_done = .false.
+      filraw_set_by_cli = .false.
+      filh2o_set_by_cli = .false.
+      csv_set_by_cli = .false.
       NCLIARGS = COMMAND_ARGUMENT_COUNT()
-      DO 45 ICLIARG = 1, NCLIARGS
+      ICLIARG = 1
+ 45   IF (ICLIARG .GT. NCLIARGS) GO TO 46
          CALL GET_COMMAND_ARGUMENT (ICLIARG, CLIARG, LCLIARG, ISTATCLI)
          IF (ISTATCLI .NE. 0) THEN
             WRITE (*, '(A,I3)')
@@ -214,6 +218,7 @@ C     -------------------------------------------------------------------------
             END IF
             UsePrior = USEPRIOR_NONE
             UsePrior_set_by_cli = .true.
+            ICLIARG = ICLIARG + 1
          ELSE IF (CLIARG(1:LCLIARG) .EQ. '-first-prior') THEN
             IF (UsePrior_set_by_cli   .AND.
      1          UsePrior .NE. USEPRIOR_FIRST) THEN
@@ -225,17 +230,157 @@ C     -------------------------------------------------------------------------
             END IF
             UsePrior = USEPRIOR_FIRST
             UsePrior_set_by_cli = .true.
+            ICLIARG = ICLIARG + 1
+         ELSE IF (CLIARG(1:LCLIARG) .EQ. '-i') THEN
+            IF (ICLIARG + 2 .GT. NCLIARGS) THEN
+               WRITE (*, '(A)')
+     1            'Error: -i requires two paths (met-file h2o-file)'
+               FLUSH(6)
+               STOP 1
+            END IF
+            CALL GET_COMMAND_ARGUMENT (ICLIARG+1, filraw_cli, LCLIVAL,
+     1                                  ISTATCLI)
+            IF (ISTATCLI .NE. 0) THEN
+               WRITE (*, '(A,I5,A)')
+     1            'Error: -i met-file path is ', LCLIVAL,
+     2            ' characters, exceeding the 255-character limit'
+               FLUSH(6)
+               STOP 1
+            END IF
+            CALL GET_COMMAND_ARGUMENT (ICLIARG+2, filh2o_cli, LCLIVAL,
+     1                                  ISTATCLI)
+            IF (ISTATCLI .NE. 0) THEN
+               WRITE (*, '(A,I5,A)')
+     1            'Error: -i h2o-file path is ', LCLIVAL,
+     2            ' characters, exceeding the 255-character limit'
+               FLUSH(6)
+               STOP 1
+            END IF
+            filraw_set_by_cli = .true.
+            filh2o_set_by_cli = .true.
+            ICLIARG = ICLIARG + 3
+         ELSE IF (CLIARG(1:LCLIARG) .EQ. '-csv') THEN
+            IF (ICLIARG + 1 .GT. NCLIARGS) THEN
+               WRITE (*, '(A)')
+     1            'Error: -csv requires an output path'
+               FLUSH(6)
+               STOP 1
+            END IF
+            CALL GET_COMMAND_ARGUMENT (ICLIARG+1, filcsv_cli, LCLIVAL,
+     1                                  ISTATCLI)
+            IF (ISTATCLI .NE. 0) THEN
+               WRITE (*, '(A,I5,A)')
+     1            'Error: -csv output path is ', LCLIVAL,
+     2            ' characters, exceeding the 255-character limit'
+               FLUSH(6)
+               STOP 1
+            END IF
+            csv_set_by_cli = .true.
+            ICLIARG = ICLIARG + 2
          ELSE
             WRITE (*, '(A,A)') 'Error: unrecognized command-line ',
      1                          'argument: '//CLIARG(1:LCLIARG)
             FLUSH(6)
             STOP 1
          END IF
- 45   CONTINUE
+         GO TO 45
+ 46   CONTINUE
 C     -------------------------------------------------------------------------
 C     Get changes to Control Variables.
 C     -------------------------------------------------------------------------
       CALL MYCONT ()
+C     -------------------------------------------------------------------------
+C     Reapply CLI-set FILRAW/FILH2O/FILCSV, since MYCONT's NAMELIST read
+C       silently overwrites them if the control file also sets its own
+C       filraw=/filh2o=/filcsv= (confirmed: MYCONT never pre-blanks these).
+C     -------------------------------------------------------------------------
+      IF (filraw_set_by_cli) THEN
+         FILRAW = filraw_cli
+      END IF
+      IF (filh2o_set_by_cli) THEN
+         FILH2O = filh2o_cli
+      END IF
+      IF (csv_set_by_cli) THEN
+C        ----------------------------------------------------------------------
+C        Pre-flight collision guard.  LCSV is a real Fortran unit number,
+C          not a boolean -- forcing it to 11 while the control file
+C          independently assigns unit 11 to another output would silently
+C          steal the unit (F77 OPEN semantics: re-OPENing an already-
+C          connected unit with a different file implicitly closes the old
+C          one, uncaught by ERR=).  Full sweep of every OPEN statement in
+C          this file (not just names that looked plausible): LBASIS,
+C          LCOORD, lcoraw, LH2O, LPRINT, LPS, LRAW, LTABLE.
+C          (lcsi_sav_1/lcsi_sav_2 excluded: confirmed pure sentinels
+C          compared against hardcoded 12/13, never used as an OPEN unit
+C          themselves.  lcontr_scratch excluded: COMMON but not
+C          NAMELIST-settable.  lscratch excluded: a local compile-time
+C          PARAMETER, not a COMMON variable at all.)  All eight below are
+C          already known here (MYCONT has returned).
+C        ----------------------------------------------------------------------
+         IF (LBASIS .EQ. 11) THEN
+            WRITE (*, '(A)') 'Error: -csv requires Fortran unit 11, '//
+     1         'but the control file already assigns unit 11 to '//
+     2         'LBASIS.  Change one of these settings.'
+            FLUSH(6)
+            STOP 1
+         ELSE IF (LH2O .EQ. 11) THEN
+            WRITE (*, '(A)') 'Error: -csv requires Fortran unit 11, '//
+     1         'but the control file already assigns unit 11 to '//
+     2         'LH2O.  Change one of these settings.'
+            FLUSH(6)
+            STOP 1
+         ELSE IF (LPS .EQ. 11) THEN
+            WRITE (*, '(A)') 'Error: -csv requires Fortran unit 11, '//
+     1         'but the control file already assigns unit 11 to '//
+     2         'LPS.  Change one of these settings.'
+            FLUSH(6)
+            STOP 1
+         ELSE IF (LRAW .EQ. 11) THEN
+            WRITE (*, '(A)') 'Error: -csv requires Fortran unit 11, '//
+     1         'but the control file already assigns unit 11 to '//
+     2         'LRAW.  Change one of these settings.'
+            FLUSH(6)
+            STOP 1
+         ELSE IF (LCOORD .EQ. 11) THEN
+            WRITE (*, '(A)') 'Error: -csv requires Fortran unit 11, '//
+     1         'but the control file already assigns unit 11 to '//
+     2         'LCOORD.  Change one of these settings.'
+            FLUSH(6)
+            STOP 1
+         ELSE IF (LTABLE .EQ. 11) THEN
+            WRITE (*, '(A)') 'Error: -csv requires Fortran unit 11, '//
+     1         'but the control file already assigns unit 11 to '//
+     2         'LTABLE.  Change one of these settings.'
+            FLUSH(6)
+            STOP 1
+         ELSE IF (lcoraw .EQ. 11) THEN
+            WRITE (*, '(A)') 'Error: -csv requires Fortran unit 11, '//
+     1         'but the control file already assigns unit 11 to '//
+     2         'lcoraw.  Change one of these settings.'
+            FLUSH(6)
+            STOP 1
+         ELSE IF (LPRINT .EQ. 11) THEN
+            WRITE (*, '(A)') 'Error: -csv requires Fortran unit 11, '//
+     1         'but the control file already assigns unit 11 to '//
+     2         'LPRINT.  Change one of these settings.'
+            FLUSH(6)
+            STOP 1
+         END IF
+         FILCSV = filcsv_cli
+         LCSV = 11
+      END IF
+C     -------------------------------------------------------------------------
+C     Validate the truly-final FILRAW state (post-CLI-reapply,
+C       post-control-file).  ERRMES not used: LPRINT's value is final by
+C       now but its file connection (opened later, in open_output()) is
+C       not, and EXITPS's STOP is disabled project-wide regardless.
+C     -------------------------------------------------------------------------
+      IF (FILRAW .EQ. ' ') THEN
+         WRITE (*, '(A)') 'Error: no raw/met input file specified '//
+     1                    '(neither -i nor the control file set one)'
+         FLUSH(6)
+         STOP 1
+      END IF
 C!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 c     Uncomment the following to initialize license KEYs and other Control
 c       Parameters for Frahm.
