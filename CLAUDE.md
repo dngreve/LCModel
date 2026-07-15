@@ -20,6 +20,38 @@ file (`source/LCModel.f`), originally distributed as a closed-source binary
 and later open-sourced. Treat it as scientific/numerical software: the
 priority is *numerical correctness and reproducibility*, not code aesthetics.
 
+## Guiding principle: control file = shared config, CLI = per-case specifics
+
+The control file is meant to function as a **study-wide configuration**
+applied uniformly across many datasets/subjects — the whole point is
+that using the same control file guarantees every dataset in a study is
+analyzed the same way. **Input files, output files, and other genuinely
+per-case specifics should be movable to the command line**, not baked
+into the control file, so the same control file can be reused unchanged
+across an entire study rather than hand-edited per subject.
+
+This is a standing design principle, not a one-off feature request —
+it informs goal #3 (CLI overrides for `-i`/`-csv`) and should inform any
+future per-case settings too, even ones not yet identified. When in
+doubt about whether a new option belongs in the control file or on the
+CLI, ask: does this vary per-dataset (CLI), or should it stay identical
+across an entire study for consistency (control file)?
+
+**Mechanism precedent**, established in goal #2 and reused in goal #3:
+CLI flags parsed before the control file is read, with a companion
+`_set_by_cli` flag per overridable setting, and an active reapplication
+step after `MYCONT()` returns for anything CLI-set — not a passive
+"set before and hope the control file's NAMELIST read leaves it alone."
+
+**Not yet needed, but worth revisiting if it comes up**: if a fourth or
+fifth per-case CLI override gets added on top of goal #3's `-i`/`-csv`,
+the current approach (hand-wiring a `_set_by_cli` companion flag and a
+reapply step individually for each) will start feeling repetitive.
+Don't build a generalized overridable-settings table now — that would
+be solving a problem that doesn't exist yet — but that's the point to
+reconsider a more systematic mechanism instead of continuing to hand-copy
+the same pattern.
+
 ## Domain terminology / file-naming conventions
 
 **Don't assume software-testing naming conventions apply to MRS domain
@@ -54,7 +86,10 @@ project and is worth avoiding going forward.
 
 This fork is a staged performance/architecture project on multi-voxel
 (MRSI-style) runs, in priority order. **Do the items in order** — later
-items depend on earlier ones being done safely.
+items depend on earlier ones being done safely. (Note: the original
+goal #3 — separate-file prior source — was abandoned; #3 now refers to
+a different, unrelated goal, CLI overrides for input/output files. See
+below.)
 
 1. **✅ DONE — Stop re-reading the whole input file per ring** (see
    "Per-ring I/O caching" below for full detail, including a resolved
@@ -255,10 +290,193 @@ items depend on earlier ones being done safely.
      unchanged for the default no-flags path), then manually run and
      review `-no-prior`/`-first-prior` to establish their first
      baselines.
-3. **Option: derive priors from a voxel in a separate file (`UsePrior=4`,
-   reserved).** Extend the above so the reference voxel for priors can
-   come from a different input file than the one being fit. Not
-   scoped/designed in detail yet — revisit when goal #2 is done.
+3. **ABANDONED — deriving priors from a voxel in a separate file
+   (`UsePrior=4`).** Dropped in favor of the goal below. `UsePrior=4` is
+   no longer reserved; the slot is free if ever needed again, but
+   nothing currently plans to use it.
+3. **(new) CLI overrides for input/output files, plus a mandatory-input
+   check.** Usage target:
+   `lcmodel -i met.lcm h2o.lcm -csv out.csv < lcm.control`
+   - **`-i <met-file> <h2o-file>`** — overrides `FILRAW`/`FILH2O` (the
+     existing control-file variables). **Both paths are mandatory when
+     `-i` is given** — always consumes exactly the next two arguments,
+     no optional-second-path parsing needed (decided explicitly, not
+     assumed).
+   - **`-csv <output-file>`** — overrides the control-file CSV-output
+     filename variable (exact name TBD — confirm, don't assume it's
+     `FILCSV` by analogy to `FILRAW`/`FILH2O`), and additionally forces
+     the internal equivalent of **`LCSV=11`** regardless of what the
+     control file says, so CSV output is guaranteed written whenever
+     `-csv` is used.
+   - **CLI overrides control file, unconditionally, for both.** Neither
+     needs to be set in the control file at all if given via CLI.
+   - **Mechanism — reuse the established `_set_by_cli` pattern from
+     goal #2**, this time putting the forward-looking hook to actual
+     use: parse CLI values into staging variables before `MYCONT()`
+     (as already established), set companion flags (`filraw_set_by_cli`,
+     `filh2o_set_by_cli`, `csv_set_by_cli`), then **actively reassign
+     the real control variables *after* `MYCONT()` returns**, for
+     whichever were CLI-set — don't just set-before-and-hope the
+     control file's `NAMELIST` read leaves them alone.
+   - **If no met/raw input is available from either CLI or control
+     file, exit with an error.** Find whatever check (if any) already
+     exists for a missing `FILRAW` and extend/reuse it rather than
+     inventing new error logic.
+   - **Open items to confirm before implementing — Plan mode, same
+     rigor as goals #1/#2, not yet verified:**
+     1. **CONFIRMED — reapply-after-`MYCONT()` is real, necessary
+        insurance, not just caution.** `MYCONT()`'s entire body
+        (807-1282) never assigns `FILRAW`/`FILH2O`/`FILCSV` — the only
+        occurrences of these names are the existing validation checks
+        (comparing against blank). So a control file that sets its own
+        `filraw=`/`filh2o=`/`filcsv=` would otherwise silently override
+        whatever the CLI flags set, unless the post-`MYCONT()` reapply
+        step actively overwrites them again. Confirmed directly, not
+        inferred from `NAMELIST` semantics alone.
+     2. **RESOLVED — real, severe, silent-failure risk confirmed;
+        decision reversed to add a guard.** `LCSV` is a Fortran *unit
+        number* selector (forced to `11`); collides with `LCOORD`/
+        `LTABLE`/`lcoraw`/`LPRINT` if the control file independently
+        sets any of those to `11` too. **Traced mechanism, confirmed
+        via the F77 standard's `OPEN` semantics (a same-unit re-`OPEN`
+        silently closes the previous file — not caught by `ERR=`) and
+        this program's exact execution order:** `LCSV`'s `OPEN`
+        (~283/285) runs once, early, before the per-voxel loop.
+        `LCOORD`'s `OPEN` (~2054, inside `open_output()`, called at
+        ~375 — the first statement of voxel 1's loop body) runs
+        *after* `LCSV`'s. Since it opens unit 11 second, **`LCOORD`
+        silently steals the unit from `LCSV`, not the reverse.** Every
+        `WRITE(LCSV,...)` in the file (only at ~10901/10904, inside the
+        concentration-table output reached via `FINOUT()` at ~452 —
+        after `open_output()`) then lands in `FILCOO` instead. Net
+        effect: **`FILCSV` ends up completely empty (0 bytes, not even
+        voxel 1's row) for the entire run, while `FILCOO` silently
+        accumulates every voxel's CSV-formatted row spliced into its
+        own coord-file content.** No `ERRMES`, no console warning, no
+        nonzero exit — the run reports success exactly as if everything
+        worked; the only traces are passive (an unexpectedly-empty CSV
+        file, or foreign-looking lines in the coord file, discoverable
+        only if someone happens to look).
+        **Decision reversed: add a cheap pre-flight guard, do not ship
+        "no guard."** This is exactly the silent-wrong-output failure
+        class this project has treated as unacceptable everywhere else
+        (the `BRUKER`/`SEQACQ` and `ivoxel`/`COMMON` incidents both
+        involved silent, undetected wrongness — this would be worse:
+        total, silent data loss with zero signal). **Guard design:**
+        right where the `-csv` override-reapply logic forces
+        `LCSV=11` (after `MYCONT()` returns, so `LCOORD`/`LTABLE`/
+        `lcoraw`/`LPRINT`'s control-file values are already known, and
+        before `LCSV`'s own `OPEN` at ~283/285 executes), check whether
+        any of those four already equals `11`; if so, fail loudly using
+        the same `WRITE`+`FLUSH(6)`+`STOP 1` pattern already proven in
+        goal #2, naming which variable collided (e.g. *"Error: -csv
+        requires Fortran unit 11, but the control file already assigns
+        unit 11 to LCOORD. Change one of these settings."*). Small
+        addition (~5-10 lines), reusing an already-verified error
+        mechanism, closing off a failure mode that would otherwise be
+        essentially undiscoverable. Test plan updated to cover one case
+        per potentially-colliding variable, not just review the guard.
+     3. **CONFIRMED — `FILCSV`.** `source/lcmodel.inc:43`
+        (`FILcsv*(MCHFIL)`), opened at `source/LCModel.f:283/285` —
+        matches the `FILRAW`/`FILH2O` naming pattern, but confirmed
+        rather than assumed.
+     4. **CONFIRMED — existing check at `source/LCModel.f:1270-1271`;
+        `ERRMES` unsuitable, for a more precise reason than originally
+        hypothesized.** `LPRINT` is a `NAMELIST /LCMODL/` member
+        (`source/nml_lcmodl.inc:17`), so its *value* is final by this
+        check's location — but that's not what actually matters here:
+        `LPRINT`'s **file connection** (the `OPEN`, inside
+        `open_output()` at `source/LCModel.f:2033`, called at line 375)
+        doesn't exist yet at this earlier point (1270-1271 fires before
+        375). `ERRMES`'s normal-case print (`source/LCModel.f:2526`)
+        has no unconditional fallback for an unconnected unit. So the
+        original framing ("`LPRINT` isn't set yet," from goal #2) and
+        this one ("`LPRINT`'s value is set, but its file isn't open
+        yet") are different reasons landing on the same conclusion —
+        worth keeping the distinction precise rather than reusing the
+        old reasoning verbatim. **Same fix: `WRITE`+`FLUSH(6)`+
+        `STOP 1`.**
+
+     **Design status: fully vetted, diffs reviewed, ready to apply.**
+     All four original items resolved, plus the `LCSV` collision risk
+     found, escalated, and reversed to add a guard. Diff review caught
+     and fixed three further issues before anything touched disk:
+     - **Missing truncation checks** on the `-i`/`-csv` value fetches
+       (`GET_COMMAND_ARGUMENT` silently truncates an overlong path
+       unless `STATUS=`/`LENGTH=` are checked) — fixed, now errors
+       clearly with the actual offending length reported.
+     - **Collision-guard list expanded from 4 to 8 variables**, via a
+       ground-truth sweep (grep every `open (`/`OPEN (` in the file,
+       case-insensitive — a case-*sensitive* first attempt would have
+       repeated the exact mistake that missed `average()` as a `MYDATA`
+       caller earlier in this project) rather than filtering
+       plausible-looking namelist names: `LBASIS`, `LCOORD`, `LCORAW`,
+       `LH2O`, `LPRINT`, `LPS`, `LRAW`, `LTABLE`. Two candidates
+       correctly excluded with reasoning, not by omission:
+       `LCONTR_SCRATCH` (confirmed absent from `NAMELIST /LCMODL/` —
+       no control file can ever set it) and `LSCRATCH` (confirmed a
+       compile-time `PARAMETER`, not even a `COMMON` variable).
+     - **A real, would-have-been-a-compile-error bug caught in this same
+       review**: the new `/BLCHAR/` continuation line had a blank
+       column 6 instead of a continuation character — gfortran would
+       have parsed it as a new statement, not a `COMMON`-list
+       continuation. Fixed (continuation character `1` at column 6,
+       verified by direct character-position measurement).
+     Placement safety (the reapply/guard block always executes after
+     `MYCONT()` before anything downstream) reconfirmed from multiple
+     angles: no computed `GO TO`/`ASSIGN` anywhere in the file, no
+     labels in the relevant line range, `PROGRAM LCMODL` is the file's
+     only program unit with no re-entry mechanism.
+
+     **GOAL #3 STATUS: DONE.** Diffs applied (+15 lines `lcmodel.inc`,
+     +149 lines `LCModel.f`), clean rebuild from scratch, and verified:
+     - All three existing regression baselines pass byte-for-byte with
+       no flags — default path untouched.
+     - Argument-validation errors (`-i` with one path, `-csv` with no
+       path, unrecognized flag) all produce correct nonzero exits.
+     - Goal #2's `-no-prior`/`-first-prior` still parse correctly
+       through the restructured `DO`→`GOTO` loop.
+     - **`-i`'s override genuinely verified, not just assumed**: run
+       against a control file with deliberately nonexistent
+       `filraw=`/`filh2o=` paths, using `-i` pointing to the real files
+       — succeeded, proving the reapply actually overrides rather than
+       coincidentally matching.
+     - **The collision guard verified to actually fire**: control file
+       set `LCOORD=11`, ran with `-csv` — got the exact expected error
+       naming `LCOORD`, nonzero exit. Closes the silent-data-loss
+       failure mode this whole sub-investigation was about.
+     - The missing-input check verified to actually halt (the harmless
+       pre-existing `MYCONT`-internal check fires first, as expected
+       since `EXITPS`'s `STOP` is disabled, then the new post-reapply
+       check correctly stops with a clear message).
+     - `-csv` happy path: produced a real, populated CSV with correct
+       concentration data.
+     - **CLI-driven output confirmed byte-for-byte identical to trusted
+       references, not just "looks correct."** `-csv` alone (single-
+       voxel, control-file `filraw=` left in place since that dataset
+       has no water-reference file to pair with `-i`) matches
+       `test-reference-out.csv` exactly. `-i`+`-csv` combined
+       (`multi-voxel-10` and `multi-voxel`, both with real `.ref` files,
+       control file's `filraw=`/`filh2o=`/`lcsv=`/`filcsv=` lines
+       stripped entirely) both match `test-reference-multi-voxel.csv`
+       exactly. Diff exit code 0, zero output, in all three cases. This
+       confirms the CLI-override mechanism drives the identical
+       numerical analysis as the control-file-only path — not merely
+       "doesn't crash."
+     - **Known, deliberately accepted minor UX rough edge, not a bug**:
+       the missing-input error case prints a harmless, uninformative
+       pre-existing line (`"Error in voxel but continuing"`, from the
+       untouched `MYCONT`-internal check) before the new, clear,
+       actionable error message. Not misleading (both agree something's
+       wrong; the second is specific), just noise ahead of signal.
+       Deliberately left as-is: fixing it would mean touching the
+       pre-existing, shared `ERRMES` mechanism that was intentionally
+       left alone per this goal's scope, for a cosmetic gain that isn't
+       worth the added risk. Revisit only if this actually confuses
+       real users in practice.
+     Not yet committed as of this writing — commit with the same
+     discipline as goals #1/#2 (`git status` before, `git show --stat`
+     after).
 
 OpenMP parallelization is a possible future goal but is explicitly
 **out of scope for now** — don't introduce `!$OMP` directives, threading,
