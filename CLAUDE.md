@@ -765,6 +765,35 @@ byte-for-byte with no new flags. Full closure:
   correctness, just the cap's own warning path.
 - **Not yet committed as of this writing.**
 
+## Goal #4: ABANDONED (was: `-nvoxels <N>` CLI flag)
+
+Was scoping a new CLI flag to force `NDCOLS`/`NDROWS`/`NDSLIC`/`ICOLST`/
+`ICOLEN`/`IROWST`/`IROWEN`/`ISLICE` for a single-column-of-voxels
+workflow (per Provencher's manual, Sec 5.3.2 — `docs/manual.pdf`). No
+code was ever applied — this was Plan-mode investigation only, so
+there's nothing to revert. **Abandoned before implementation.**
+
+**One thing surfaced during this investigation is real and independent
+of this abandoned goal — worth keeping on record:**
+
+**The existing `FATAL` validation on these 8 grid variables is
+toothless.** If any of them are `0` or otherwise invalid, the program
+prints a message claiming to be a "FATAL ERROR" but doesn't actually
+halt — same disabled-abort pattern found earlier in this project
+(`EXITPS`'s `STOP` is commented out project-wide, deliberately, so one
+bad voxel doesn't kill a multi-voxel batch run). This means a control
+file that sets, e.g., `NDCOLS=0` today silently continues running in
+some degenerate/undefined state rather than actually stopping, for
+*any* control file — not just ones that would have used `-nvoxels`.
+**Deliberately left unfixed here** — fixing it means touching a shared
+error-handling mechanism (`EXITPS`) that other parts of the program,
+including everything built in goals #1-3, currently depend on behaving
+the way it does; that's a bigger, riskier change than anything scoped
+so far and deserves its own dedicated investigation, not a side effect
+of an abandoned goal's diff. **If this ever needs fixing**, start by
+mapping everything else that relies on `EXITPS` not actually stopping,
+before touching it.
+
 ## Repository layout
 
 ```
