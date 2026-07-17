@@ -899,6 +899,37 @@ Fortran goals — verify, don't assume):
   of bug). Made **required**, enforced inside `write_control()` itself
   (not just the CLI's `main()`), so the guarantee holds for any future
   library caller, not only the CLI entry point.
+
+**Design decision, not a bug: `to-lcm --volume` stays optional,
+defaulting to `1.0`, and is deliberately *not* auto-derived from the
+input volume's own voxel-size metadata.** `VOLUME` is a `.RAW`-file
+`$NMID` field (see the `fmtdat`/`volume`/`tramp`/`id` bullet above) that
+directly drives LCModel's absolute-concentration scaling —
+`SCALE_RAW=fcalib*TRAMP/VOLUME` and `SCALE_H2O=TRAMP/VOLUME`, confirmed
+from `source/LCModel.f:3433,3500`. Auto-deriving it from the input
+NIfTI/MGZ's own voxel-size header was considered and rejected: this
+pipeline's inputs (masked, MIDAS-converted, sometimes-synthetic
+spectral volumes) may not carry a voxel-size header that validly
+represents the true VOI volume, so trusting it silently would trade one
+landmine (an unset default) for a different, harder-to-notice one (a
+wrong-but-plausible-looking auto-derived value). Requiring `--volume`
+outright (mirroring `hzpppm`/`echot`'s fix above) was also considered
+and rejected — unlike `hzpppm`/`echot`, `1.0` is not an arbitrary
+landmine value here; it's a mathematically neutral no-op scale factor,
+so leaving it at that default is a safe, well-understood degradation,
+not a silent correctness bug the way an unset `hzpppm`/`echot` would
+be. **Consequence of leaving it at the default**: absolute
+concentrations will be silently wrong by whatever factor the true VOI
+volume differs from `1.0` — but metabolite *ratios* (e.g. NAA/Cr) are
+completely unaffected, since `VOLUME` enters as one uniform per-voxel
+scalar applied to the whole spectrum before fitting, the same
+cancellation mechanism already confirmed for `water_scale()`'s
+`fcalib` (`source/LCModel.f:5373-5409`) — an error in one uniform
+per-voxel multiplier cancels exactly in any ratio between two
+metabolites of the same voxel. Users who need correct absolute
+concentrations must pass `--volume` explicitly with the real VOI
+volume; users who only need ratios can safely ignore it.
+
 - **`check_geometry_match()` crashed unconditionally**, not just
   weakly — `ImageGeometry.shape` returns a numpy array, not a plain
   tuple, so `!=`/`if` on it raises an ambiguous-truth-value error on

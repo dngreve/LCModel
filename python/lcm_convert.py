@@ -559,7 +559,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p_to.add_argument("--hzpppm", type=float, default=0.0)
     p_to.add_argument("--id", type=str, default="")
     p_to.add_argument("--fmtdat", type=str, default="2E15.6")
-    p_to.add_argument("--volume", type=str, default="1.0")
+    p_to.add_argument("--volume", type=str, default="1.0",
+                       help="Voxel/VOI volume for this .RAW file's $NMID "
+                            "header, driving LCModel's SCALE_RAW/SCALE_H2O "
+                            "absolute-concentration scaling. Not "
+                            "auto-derived from the input volume's own "
+                            "voxel-size metadata -- that metadata may not "
+                            "validly represent the true VOI volume for this "
+                            "pipeline's inputs. Defaults to 1.0 (a no-op "
+                            "scale factor); pass the real value explicitly "
+                            "if absolute concentrations matter (metabolite "
+                            "ratios are unaffected either way -- see "
+                            "CLAUDE.md)")
     p_to.add_argument("--tramp", type=float, default=1.0)
     p_to.set_defaults(func=cmd_to_lcm)
 
