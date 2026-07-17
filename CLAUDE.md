@@ -794,6 +794,166 @@ of an abandoned goal's diff. **If this ever needs fixing**, start by
 mapping everything else that relies on `EXITPS` not actually stopping,
 before touching it.
 
+## Python pipeline: `lcm-control` / `lcm-convert` (`python/`)
+
+**STATUS: DONE, committed.** A separate, greenfield Python layer
+connecting imaging volumes (nifti, FreeSurfer `.mgz`, or any other
+`surfa`-supported format) to this project's Fortran CLI work (goal #3's
+`-i`/`-csv`). Based on `matlab/lcmodel.m`'s `LCMControl`-equivalent
+class and `write_control()`/`midas2lcmodel()`/`loadresults()` logic,
+reimplemented and generalized, not just ported line-for-line. Run under
+`fspython` (must be on `PATH`) — `lcm_convert.py` needs `surfa`;
+`lcm_control.py` only needs it if `--mask`/`--meta` are used (lazy
+import, so it still runs without `surfa` for ordinary use).
+
+**Three tools, one shared library** (`lcm_control.py` imported by
+`lcm_convert.py`, not duplicated):
+
+- **`lcm-control`** — builds a `$LCMODL` control file from defaults, an
+  optional input control file (`--i`), and CLI overrides. Precedence:
+  explicit CLI > `--mask`/`--meta`-derived values > `--i` input file >
+  built-in default. `--mask <path>` derives `ndcols`/`icolen` from a
+  mask's voxel count (`> 0.5`, matching `lcm_convert.py`'s own
+  threshold). `--meta <path>` derives `nunfil` from a `to-lcm` run's
+  `.meta.json` sidecar (the real, data-derived point count, not a
+  guess).
+- **`lcm-convert to-lcm`** — converts one (met **or** ref) real+
+  imaginary volume pair to an LCModel `.RAW` file: masked, optionally
+  MIDAS-converted (`midas_to_lcmodel_fid()`, replicating
+  `midas2lcmodel()`'s centering-shift-then-`ifft` exactly, including a
+  MATLAB-`round()`-matching helper since Python's `round()` uses
+  banker's rounding and would silently disagree on `.5` cases),
+  optionally prepending a single external reference voxel. Writes a
+  sidecar `<path>.meta.json`.
+- **`lcm-convert run`** — invokes `lcmodel` via `-i met.lcm h2o.lcm
+  -csv out.csv`, given existing outputs of two separate `to-lcm` calls.
+  **Deliberately a separate subcommand from `to-lcm`**, not folded in —
+  `to-lcm` only ever produces one file type per call, but running
+  `lcmodel` needs both together; an earlier draft tried to fold this
+  into `to-lcm` with a stubbed `h2o_path=None`, caught as broken before
+  shipping and split out properly.
+- **`lcm-convert from-csv`** — reassembles an LCModel `.csv` fit into a
+  volume, mapping each row's 1-based `"Col"` field back to its mask
+  position (the ring-scan visits columns out of ascending order, so
+  CSV rows are not in mask order — `from-csv` reads `Col` per-row
+  rather than assuming sequential order), accounting for any inserted
+  reference voxel's offset.
+
+**Mask voxel ordering: Fortran (column-major) flattening throughout**,
+matching `matlab/lcmodel.m`'s own `loadresults()`/`loadresults2()`
+convention (`find(mask.vol)` — MATLAB arrays are always column-major).
+If any future code touches mask flattening, it must use the same
+order (`numpy.ravel(order="F")`), or CSV↔mask round-tripping silently
+corrupts voxel correspondence.
+
+**Verified end-to-end, not just unit-tested**: synthetic volumes built
+from real `multi-voxel-10` FID data (not fabricated signal), with a
+deliberately non-cubic-voxel/asymmetric test geometry chosen so an
+axis-order or sign bug would be visible, not masked by symmetry. Full
+pipeline (`lcm-control` → `to-lcm` ×2 → `run` → `from-csv`) produces a
+`.csv` **byte-for-byte identical** to `test-reference-multi-voxel.csv`,
+and `from-csv`'s reconstructed volume was checked **voxel-by-voxel**
+against the mask (not just "N/N populated").
+
+**Real bugs found and fixed during development** (same standard as the
+Fortran goals — verify, don't assume):
+
+- **`fmtdat`/`volume`/`tramp`/`id` are `.RAW`-file `$NMID` fields, not
+  `NAMELIST /LCMODL/` members** — confirmed by an exhaustive, validated
+  sweep against `nml_lcmodl.inc` (all 42 real members checked
+  individually, not just the four that happened to crash). Including
+  them in `write_control()`'s output crashed LCModel's `NAMELIST` read
+  unconditionally. Removed from `PARAM_TABLE`; already correctly
+  handled by `to-lcm`'s own `--volume`/`--tramp`/`--id`/`--fmtdat`
+  flags.
+- **`lps`/`ltable`/`lcoord`/`lprint` defaulted "on" while their
+  `fil*` paths defaulted to `""`** — a self-contradictory combination
+  that fatally crashes LCModel's own validation
+  (`source/LCModel.f:1644-1645`-style checks) unless every path is
+  remembered. Fixed properly (a first pass added the derivation logic
+  but forgot to actually change the `PARAM_TABLE` defaults, so it
+  silently never fired — caught by inspecting the generated file
+  directly, not trusting the logic read correctly): each now derives
+  "enabled" from whether its path was actually given, so the
+  untouched-defaults case is self-consistently off instead of
+  self-contradictory.
+- **`if ctrl.sddegp:` treated the legitimate, explicitly-requested
+  value `0.0` as unset**, silently falling back to LCModel's real
+  default of `20.0` — the actual root cause of large, widespread fit
+  differences from reference during testing (this was the specific bug
+  that made the end-to-end test's first attempt fail non-obviously).
+  Fixed: `PARAM_TABLE` defaults changed to `None`, checks changed to
+  `is not None` — same fix pattern applied project-wide after a fresh
+  sweep for the same bug shape elsewhere (none found; `nomit`/
+  `srcraw`/`savdir` all checked individually and confirmed not to
+  share this defect).
+- **`nunfil`'s help text claimed "0 = infer from data"** — no such
+  inference exists; LCModel's own `BLOCK DATA` default is `2048`,
+  silently misaligning or crashing on any other point count. Fixed:
+  `to-lcm`'s `.meta.json` records the real, derived-from-actual-data
+  `nunfil`; `lcm-control --meta` reads it through automatically,
+  closing the landmine rather than just documenting it.
+- **`hzpppm`/`echot` have no meaningful default** (LCModel's own
+  `BLOCK DATA` values, `84.47` and `-1.`, are landmines, not sensible
+  fallbacks — found as a side effect of the `nunfil` fix, same family
+  of bug). Made **required**, enforced inside `write_control()` itself
+  (not just the CLI's `main()`), so the guarantee holds for any future
+  library caller, not only the CLI entry point.
+- **`check_geometry_match()` crashed unconditionally**, not just
+  weakly — `ImageGeometry.shape` returns a numpy array, not a plain
+  tuple, so `!=`/`if` on it raises an ambiguous-truth-value error on
+  both a genuine mismatch *and* an exact match. Fixed: uses the real
+  `surfa.transform.image_geometry_equal()` (confirmed present in
+  `surfa` 0.6.3, not exposed as a top-level `sf.*` name), comparing
+  shape/voxsize/center/rotation/shear/the full affine.
+- **`run_lcmodel()` trusted the subprocess exit code as the success
+  signal** — but LCModel's `ILEVEL<0` fatal path executes a bare
+  Fortran `STOP` with no explicit code, returning `0` regardless of
+  failure. **Same "reports success while actually failing" class
+  already found in this project's Fortran work** (`EXITPS`'s `STOP`
+  being commented out, there for `ILEVEL>0`) — confirmed live, not
+  inferred from the Fortran precedent alone. Fixed: also requires the
+  `.csv` to exist and be non-empty before treating a run as successful.
+- **`read_lcm_csv()` crashed with `KeyError: 'Col'` on every real
+  LCModel CSV** — the header is comma-**space** separated
+  (`'Row, Col'`), so every field but the first has a leading space;
+  the code stripped names only for a presence check, then indexed rows
+  with the unstripped key. Fixed: `DictReader`'s `fieldnames`
+  reassigned to stripped values before iterating.
+
+**New safety guard added, not a bug fix**: `from-csv`'s
+`Col`-to-mask-voxel mapping is only correct when `ndrows=ndslic=1` —
+`Col` (the ring-scan's `idcol` loop variable) only reduces to the true
+flat sequential voxel index in that specific degenerate-grid case
+(confirmed by tracing `ivoxel`'s actual formula against `LCModel.f`'s
+ring loop); for any other grid shape it's just the column-within-row
+coordinate, and reusing this mapping would silently misassign every
+voxel with no error. `check_single_column_grid()` added, `from-csv`'s
+`--control` argument made required (was previously absent entirely),
+errors loudly outside that geometry rather than ever mismapping
+silently.
+
+**Physical-correctness cross-check, genuinely verified, not assumed**:
+`surfa`'s `vox2world` and MATLAB's `MRIread`'s `vox2ras0` affines
+confirmed **entry-for-entry identical** for both `.nii.gz` and `.mgz`,
+using a deliberately non-cubic-voxel (2×3×4mm) test volume with an
+off-center marker specifically chosen so an axis-order or sign bug
+would produce a visibly different answer, not just a scaled one —
+this closes an earlier honestly-flagged gap (only `surfa`'s own
+write→read self-consistency had been checked; no MATLAB was available
+at that point for genuine cross-tool comparison). Confirms this
+pipeline's output volumes are correctly oriented for `loadresults()`
+or any other MATLAB-based FreeSurfer tool consuming them.
+
+**One incidental, non-bug detail worth recording so it isn't
+re-litigated**: `write_control()`'s `$LCMODL`/`$END` delimiters carry a
+leading space in the output. This was traced, tested, and confirmed to
+be **purely cosmetic** — `gfortran`'s `NAMELIST` reader here doesn't
+care about the group delimiter's column position; a version with no
+leading space produced byte-identical `lcmodel` output. Kept for
+style-consistency with this repo's existing control files, not because
+it's functionally required.
+
 ## Repository layout
 
 ```
