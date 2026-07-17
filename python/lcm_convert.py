@@ -235,16 +235,33 @@ def check_geometry_match(geom_a, geom_b, name_a: str, name_b: str) -> None:
     tuple (unlike ndarray.data.shape, which IS a plain tuple). It
     crashed on a shape MATCH just as reliably as on a mismatch, since
     numpy's array `!=`/`if` ambiguity doesn't depend on the content.
+
+    tol=1e-4, not the function's own default of tol=0.0 (exact
+    bit-for-bit match): confirmed against real data (two files from the
+    same MRSI pipeline, ku-mrsi/metasurfer/tdad-046-01/vol.lcm/
+    mask.nii.gz vs lcm.met.real.nii.gz) that tol=0.0 rejects
+    geometrically-identical files over float32 round-off noise alone --
+    measured max abs diff there was ~7.6e-6 in vox2world/center and
+    ~4.8e-7 in voxsize, consistent with single-precision serialization
+    noise between two pipeline steps writing "the same" header, not a
+    real misalignment. 1e-4 clears that with over an order of magnitude
+    of margin while still catching genuine mismatches (which are
+    physically going to be off by far more than float32 noise).
     """
     import surfa as sf
 
-    if not sf.transform.image_geometry_equal(geom_a, geom_b):
+    if not sf.transform.image_geometry_equal(geom_a, geom_b, tol=1e-4):
+        def _fmt(g):
+            return (f"shape={tuple(int(x) for x in g.shape)} "
+                    f"voxsize={tuple(float(x) for x in g.voxsize)} "
+                    f"center={tuple(float(x) for x in g.center)}\n"
+                    f"    rotation=\n{g.rotation}\n"
+                    f"    vox2world.matrix=\n{g.vox2world.matrix}")
         raise ValueError(
-            f"Geometry mismatch between {name_a} and {name_b}: "
-            f"shape {tuple(int(x) for x in geom_a.shape)} vs "
-            f"{tuple(int(x) for x in geom_b.shape)}, "
-            f"voxsize {tuple(float(x) for x in geom_a.voxsize)} vs "
-            f"{tuple(float(x) for x in geom_b.voxsize)}")
+            f"Geometry mismatch between {name_a} and {name_b} "
+            f"(tolerance 1e-4 exceeded):\n"
+            f"  {name_a}: {_fmt(geom_a)}\n"
+            f"  {name_b}: {_fmt(geom_b)}")
 
 
 def save_volume(path: str, data: np.ndarray, geom) -> None:

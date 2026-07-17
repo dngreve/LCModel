@@ -906,6 +906,32 @@ Fortran goals — verify, don't assume):
   `surfa.transform.image_geometry_equal()` (confirmed present in
   `surfa` 0.6.3, not exposed as a top-level `sf.*` name), comparing
   shape/voxsize/center/rotation/shear/the full affine.
+  **Follow-up bug, found on first real-data use**: the initial fix
+  called `image_geometry_equal()` at its default `tol=0.0` — exact
+  bit-for-bit equality — which real independently-written files never
+  satisfy (observed float32 serialization noise: `~1e-5`–`~1e-7` on
+  `voxsize`/`vox2world`/`center`, from two pipeline steps encoding "the
+  same" geometry). **Fixed: `tol=1e-4`**, confirmed with real
+  justification, not just "big enough for the one failure encountered":
+  `tol` is an **absolute** tolerance (confirmed from `surfa` source),
+  applied identically to mm-scale translation fields and the
+  dimensionless rotation matrix. Tested against two deliberate,
+  physically-real misalignments built from this pipeline's actual
+  geometry (not synthetic toys): a half-voxel translation shift
+  (2.8125mm) — `image_geometry_equal` correctly returns `False`,
+  ~28,000× the tolerance; a 0.5° rotation — correctly returns `False`,
+  ~87× the tolerance. Detection floor: sub-micron translation
+  (`<1e-4mm`) or ~0.006° rotation would slip through undetected — but
+  that's far below anything physically meaningful at this pipeline's
+  actual voxel scale (4.4–5.6mm), and far above the observed
+  serialization noise, so `1e-4` sits in a clean, well-justified gap
+  for this specific use case. **Scale-dependency caveat, not yet
+  acted on**: this reasoning is specific to this pipeline's typical
+  voxel sizes — if `check_geometry_match()` is ever reused for imaging
+  data with meaningfully different physical scale (e.g. much
+  higher-resolution acquisitions), `1e-4` should be re-derived against
+  that context's own noise floor and physically-meaningful threshold,
+  not assumed to still be the right number.
 - **`run_lcmodel()` trusted the subprocess exit code as the success
   signal** — but LCModel's `ILEVEL<0` fatal path executes a bare
   Fortran `STOP` with no explicit code, returning `0` regardless of
