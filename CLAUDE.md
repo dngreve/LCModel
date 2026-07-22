@@ -794,6 +794,177 @@ of an abandoned goal's diff. **If this ever needs fixing**, start by
 mapping everything else that relies on `EXITPS` not actually stopping,
 before touching it.
 
+## Goal #5: debugging/evaluation tools — `-csv-extra`, `-save-input`, `-save-fit`, `-save-freq-axis`
+
+**STATUS: DONE, implemented, verified. Not yet committed as of this
+writing.** Four new CLI flags, all independent and composable, built to
+help evaluate/debug fits on noisy, complex MRSI data — motivated by
+wanting more per-voxel fit-quality info in the CSV, and the ability to
+inspect actual input/fit spectra outside LCModel using existing tooling.
+
+**Scope decisions, confirmed before implementation, not assumed:**
+- **`-save-input`/`-save-fit` are `met`-only — no `ref`/H2O output.**
+  Confirmed via exhaustive trace: nothing analogous to `met`'s `CY` (a
+  persisted, windowed, phase-corrected frequency array) exists anywhere
+  for the water reference — every H2O/ref touch point (`MYDATA`,
+  `phase_with_max_real`, `ecc_truncate`, `AREAWA`/`AREAW2`/`GETPHA`) is
+  either raw time-domain (`H2OT`) or a transient, full-length,
+  unwindowed FFT variant that collapses to a scalar before ever
+  reaching `SOLVE`. Inventing a `ref`-side file would misrepresent
+  something structurally different (different length, different
+  processing stage) — dropped entirely rather than substituted.
+- **Residual is not saved** — deliberately left for the user to compute
+  as `input − fit` outside LCModel, now that both are available and
+  guaranteed point-aligned (see below).
+- **Complex, not just magnitude/real-part**, even though the `.ps` plot
+  itself displays magnitude — confirmed the underlying representation
+  really is complex at the capture point, not assumed just because
+  spectral fitting "usually" works that way.
+- **Frequency-domain spectra directly**, not a time-domain LCM file
+  needing a separate `to-midas` inverse-conversion tool — confirmed
+  unnecessary once it was established the new arrays are captured at
+  `SOLVE`'s `NY`-point analysis-window stage, genuinely frequency-domain
+  by construction.
+- **`-save-freq-axis <path>` is its own required, explicit CLI flag**,
+  not a fixed filename or one derived from `-save-input`/`-save-fit`'s
+  prefixes — deliberate choice for explicitness, matching this
+  project's general CLI philosophy. Required whenever `-save-input` or
+  `-save-fit` is given; errors loudly if omitted.
+- **CSV-format spectral files** (`Row, Col, Value`), not a custom
+  per-voxel-block text format — reuses `lcm_convert.py`'s existing
+  generic CSV machinery (`read_lcm_csv`/`from-csv`) with zero new
+  Python code, at the cost of a larger file (repeating `Row`/`Col`
+  every point-row) — explicit tradeoff, not an oversight.
+- **`-csv-extra` is fully independent of `-csv`/`-save-input`/
+  `-save-fit`** — adds columns to the *existing* concentration-table
+  CSV (same `LCSV` unit), not a second file. Confirmed this doesn't
+  need a `Row`/`Col`-duplication workaround since there's no second
+  file at all.
+
+**New CLI flags:**
+- **`-csv-extra`** (boolean) — adds `SNR`, `FWHM`, `Shift`, `Phase0`,
+  `Phase1`, `alphaB`, `alphaS` columns to the concentration-table CSV,
+  reusing already-computed per-voxel values. Errors loudly if given
+  without CSV output actually enabled (no `-csv`, no `lcsv` in the
+  control file) — fail-loud, matching this project's established
+  philosophy, not a silent no-op.
+- **`-save-input <prefix>`** — writes `<prefix>.real.csv`/
+  `<prefix>.imag.csv`: `met`'s complex input spectrum (`CY`, captured
+  at `SOLVE`'s existing `YREAL(NROW)=REAL(CY(JY))[-BACFIT]` reduction
+  point, before the reduction).
+- **`-save-fit <prefix>`** — writes `<prefix>.real.csv`/
+  `<prefix>.imag.csv`: `met`'s complex fit-total spectrum, via a new
+  accumulator (`cfit_total`) built by mirroring the existing `DCYFIT`
+  pattern (previously only active in `SOLVE`'s `.NOT.ONLYFT` branch)
+  inside the `ONLYFT` branch too.
+- **`-save-freq-axis <path>`** — required companion to either of the
+  above; writes the shared `NYuse`-point ppm axis (`PPM(1..NYuse)`,
+  native descending order — already matches MRS "high ppm on the left"
+  display convention with no reversal needed) exactly once per run.
+
+**The correctness-critical design detail: `SUBBAS` branching had to be
+replicated in BOTH new arrays, and the two review rounds caught real
+bugs in each, independently — worth understanding precisely, not just
+trusting "it's fixed now":**
+
+`YFITRE(NROW,0)`/`YREAL(NROW)` are governed by complementary halves of
+one `IF (SUBBAS) ... ELSE ... END IF` block (`SOLVE`, ~10166-10177):
+when `SUBBAS`, background is *subtracted from the input data*
+(`YREAL(NROW)=REAL(CY(JY))-BACFIT`) and excluded from the fit total;
+when `.NOT.SUBBAS`, background is *added into the fit total*
+(`YFITRE(NROW,JMETAB)=YFITRE(NROW,JMETAB)+BACFIT` for every `JMETAB`
+including `0`) and the input is left unreduced.
+
+- **`cfit_total`'s bug (caught during design review)**: the first draft
+  of the plan didn't account for this branching at all — a new
+  complex-fit accumulator that unconditionally summed background would
+  not reproduce `YFITRE(NROW,0)` when `SUBBAS` was true. **Fixed**:
+  `cfit_total`'s background contribution is gated `IF (.NOT.SUBBAS)`,
+  matching exactly when `YFITRE` itself gets the background added.
+- **`cy_saved_for_input`'s bug (caught in a *later* review round, after
+  the fit-side fix was already in place — a genuine second instance of
+  the same mistake, not a leftover)**: the design initially captured
+  `CY(JY)` unconditionally, with no `SUBBAS`-conditional `BACFIT`
+  subtraction — meaning `REAL(cy_saved_for_input)` would NOT equal
+  `YREAL(NROW)` whenever `SUBBAS` was true, silently corrupting any
+  downstream `residual = input − fit` computation done outside LCModel
+  by exactly `BACFIT` at every point. **Fixed**: `cy_saved_for_input`
+  now mirrors `YREAL`'s own branching exactly (`SUBBAS` → subtract
+  `BACFIT`; `.NOT.SUBBAS` → leave unreduced) — the two arrays are
+  correctly gated by *opposite* conditions of the same `SUBBAS`
+  variable (complementary halves of one block), not independently
+  chosen conditions that happen to differ.
+- **Verified empirically, not just derived**: `REAL(cy_saved_for_input)
+  == YREAL(NROW)` and `REAL(cfit_total) == YFITRE(NROW,0)` checked
+  numerically against real `LCOORD` output, under both `SUBBAS` values
+  (default `.FALSE.` and explicit `SUBBAS=T`). Observed difference:
+  a *constant* `5.000e-06` at every point across a full 213-point,
+  O(1)-magnitude (RMS≈1.12) spectrum — confirmed to be the fixed-
+  quantum signature of `LCOORD`'s `1P10E13.5` print format (5 sig
+  figs, max rounding ≈ half the last digit), not a real discrepancy —
+  the constant-not-scaling-with-magnitude pattern is what distinguishes
+  print-rounding from an actual algorithmic error.
+
+**Other bugs/gaps caught during review, before applying anything:**
+- **`-csv-extra`'s FWHM column initially hardcoded `fwhmls`**, but
+  `ETCOUT`'s own FWHM computation branches on `nsides.gt.0` (`fwhmls`)
+  vs. else (`SQRT(fwhmst_full**2+FWHMBA**2)`) — self-caught during
+  diff drafting, fixed via a new local `fwhm_csv` scratch variable
+  matching the same branching, confirmed no name collision.
+- **Units 16-19 (`-save-input`/`-save-fit`'s four CSV files) were
+  opened but never explicitly closed** in the first diff draft, unlike
+  unit 15 (axis file) and unlike this project's own established
+  convention (`if (lcsv .gt. 0) close (lcsv)`, goal #2b) — fixed, added
+  at the same end-of-run site `LCSV` itself uses.
+- **The relocated CSV write** (`-csv-extra`'s new columns don't exist
+  yet at the CSV's original write position, so the write itself had to
+  move later in `FINOUT`) was verified — not just assumed — to still
+  execute unconditionally, exactly once per analyzed voxel: confirmed
+  both no `RETURN`/`STOP` exists in `FINOUT`'s body, AND no `GO TO`
+  anywhere in the file whose origin precedes the new write position and
+  whose target lies after it (ruling out a skip-around branch, a
+  different failure mode than an early exit).
+- **A single reusable `CHECK_UNIT_COLLISION` subroutine** (taking a
+  unit number + flag name as arguments) replaces what would otherwise
+  have been five duplicated 9-branch collision guards — checks the
+  same 9 `NAMELIST`-settable unit variables `-prior-file`'s original
+  guard established (`LBASIS`, `LCOORD`, `lcoraw`, `LCSV`, `LH2O`,
+  `LPRINT`, `LPS`, `LRAW`, `LTABLE`). Unit assignments: 15 (frequency
+  axis), 16/17 (`-save-input` real/imag), 18/19 (`-save-fit`
+  real/imag) — checked against the full existing inventory (1/2/3/5/8/
+  11/12/13/14/21/29/31), no collisions.
+- **New `/BLCPLX/` members** (`cy_saved_for_input(MY)`,
+  `cfit_total(MY)`) are plain single-precision `COMPLEX`, matching
+  `CY`'s own precision — not `COMPLEX*16`, mirroring how `YFITRE`/
+  `YREAL`/`BACKRE` already narrow from `COMPLEX*16` scratch arithmetic
+  at the point of storage. Fixed-size (bound `MY=12000`, the same
+  compile-time bound every other plotting array in `SOLVE` already
+  uses) — no `ALLOCATABLE`/`MODULE` needed, unlike `RAWCACHE`.
+
+**Point-alignment guarantee (structural, verified, not assumed)**:
+`INITIA`'s one-time gap-compaction of `PPM(1..NY)` down to
+`PPM(1..NYUSE)` establishes the exact index space `SOLVE`'s own
+`NROW` compaction (`lcy_skip`-gated, once per non-skipped `JY`)
+populates every per-voxel array into — `YREAL`/`YFITRE`/`BACKRE` and
+now `cy_saved_for_input`/`cfit_total` all share this same origin.
+Confirmed live: peaks in a reconstructed spectrum (zipping the
+frequency-axis file against `-save-input`'s output for one voxel)
+landed within ~0.01-0.03 ppm of known metabolite chemical shifts for
+the basis set used (Cr ~3.03→3.019 found, Cho ~3.2→3.208, NAA
+~2.01→1.979, mI ~3.56→3.554 — small offsets consistent with that
+voxel's own fitted 0.059 ppm data shift) — the specific signature an
+off-by-one/scrambling bug would visibly break, not just a plausible-
+looking file.
+
+**Verification summary**: clean build, no new warnings; all three
+existing regression baselines pass byte-for-byte with no new flags;
+all three new error paths (missing `-save-freq-axis`, `-csv-extra`
+without CSV enabled, unit collision) fire correctly with nonzero exit;
+`-csv-extra`'s seven new columns cross-checked exactly against
+`ETCOUT`'s own printed values for the same voxel; frequency-axis file
+confirmed to write exactly once even when both `-save-input` and
+`-save-fit` are given together (213 lines, not 426).
+
 ## Python pipeline: `lcm-control` / `lcm-convert` (`python/`)
 
 **STATUS: DONE, committed.** A separate, greenfield Python layer
@@ -1010,6 +1181,71 @@ care about the group delimiter's column position; a version with no
 leading space produced byte-identical `lcmodel` output. Kept for
 style-consistency with this repo's existing control files, not because
 it's functionally required.
+
+**Deliberate design decision: this pipeline does NOT use MATLAB
+`MRIread`'s default axis-permute convention.** `MRIread(fstring)`
+defaults to `permuteflag=1`, which physically swaps array axes 0/1 on
+read (and `MRIwrite` reverses it on write) while leaving `vox2ras0`
+completely untouched — `MRIread.m`'s own docstring warns about the
+resulting index confusion (`mri.vox(j+1,i+1,k+1) = mri(i,j,k)`).
+This project's `lcm_convert.py` deliberately uses `surfa`'s native
+array order throughout instead (confirmed equivalent to `MRIread`'s
+**unpermuted** convention, `permuteflag=0`, by the earlier physical-
+correctness affine test). **This means output volumes will not
+numerically/structurally match legacy MATLAB tools run with
+`MRIread`'s default settings** — confirmed to be an intentional
+convention choice, not a bug, after two separate investigations:
+1. A large, real, initially-alarming discrepancy against
+   `sid2lcmodel.m` output was root-caused and does **not** implicate
+   this design decision — see below.
+2. The permute-vs-native question was directly tested (not assumed):
+   applying `midas_to_lcmodel_fid()` to a raw array vs. explicitly
+   emulating `MRIread`'s permute-in/permute-out gave **identical**
+   results, confirming `fast_vol2mat`/`fast_mat2vol`-style reshaping
+   and the MIDAS conversion itself are axis-order-independent — the
+   permute question genuinely doesn't affect correctness here.
+Any future comparison against MATLAB-side output must either use
+`MRIread(..., permuteflag=0)` on the MATLAB side, or explicitly account
+for the axis-0/1 transpose — do not assume they'll match directly.
+
+**Real bug found and root-caused: feeding already-MIDAS-converted data
+back through `to-lcm` with MIDAS conversion still enabled applies the
+transform twice.** Surfaced as "sweeping differences" against
+`sid2lcmodel.m` output when running `to-lcm --type ref` on
+`lcm.ref.real.nii.gz`/`lcm.ref.imag.nii.gz` — filenames that are
+`sid2lcmodel.m`'s own **output** naming convention (already
+time-domain FID data, already passed through `midas2lcmodel()` once),
+not raw frequency-domain input. `to-lcm` applies MIDAS conversion by
+default; running the centering-shift-then-`ifft` transform on data
+that's already been through it once produces a large, structural,
+non-scalar difference — not round-off, not a clean scale factor,
+exactly the "sweeping" symptom originally reported. **Confirmed
+resolved with a clean, exact, zero-residual match** once `--no-midas`
+is used on already-converted input — a categorically different, much
+stronger result than the still-open item below. **Root cause: this
+specific run passed the wrong (already-converted) files by mistake —
+a one-off user error, not a systemic pipeline risk.** A filename-
+pattern-based warning was considered and **deliberately declined** —
+not worth defensive code for a mistake that's now understood and
+avoidable by checking which files are being passed.
+
+**Separate, still-open, NOT resolved — needs external context, not
+more code archaeology.** Converting genuinely-raw `ref.real.nii.gz`/
+`ref.imag.nii.gz` (confirmed via `mask.crs.dat`'s recorded voxel index
+and via a real `sid2lcmodel.m`-output directory structure, on two
+subjects) does not reproduce `dng.ref`/`lcm.ref.*`: the residual is
+large (~1.5, comparable to the signal's own magnitude), not
+round-off, and not a clean scale factor either (`dng.ref` ~10-15×
+larger, but the *pattern* differs too, not just magnitude — ruling out
+a simple missed normalization constant). Both `midas2lcmodel()`'s
+formula and the permute question were reconfirmed correct/irrelevant
+as part of this same investigation, so neither explains it. Most
+likely explanation, per the script's own comments: an additional
+preprocessing step ("`metasurfer-pp`") happens between true raw
+acquisition and `ref.real.nii.gz` that isn't visible in either
+`sid2lcmodel.m` or `lcmodel.m`'s code. **Do not guess further at this
+without that context** — needs the project maintainer's own knowledge
+of what that preprocessing step does, not additional code tracing.
 
 ## Repository layout
 

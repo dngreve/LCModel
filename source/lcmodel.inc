@@ -46,6 +46,8 @@ c
      1          filraw_cli*(MCHFIL), filh2o_cli*(MCHFIL),
      1          filcsv_cli*(MCHFIL),
      1          prior_file_cli*(MCHFIL), save_prior_file_cli*(MCHFIL),
+     1          save_input_cli*(MCHFIL), save_fit_cli*(MCHFIL),
+     1          save_freq_axis_cli*(MCHFIL),
      1          NACOMB(MCONC)*(MCHCOM), NACOM2(MCONC)*(MCHCOM),
      1          NAMEAC(MMETAB)*(mchmet), 
      1          NAMREL*(MCHCOM), norato(mmetab)*(mchmet), 
@@ -69,19 +71,21 @@ c
      1                FILPS, FILRAW, FILTAB,
      1                filraw_cli, filh2o_cli, filcsv_cli,
      1                prior_file_cli, save_prior_file_cli,
+     1                save_input_cli, save_fit_cli, save_freq_axis_cli,
      1                NACOMB, nacom2, NAMEAC, NAMREL, norato,
      1                OWNER, OWNOUT, PGNORM, 
      1                savdir, SEQ_raw, sptype, srch2o, srcraw, 
      1                SYNUS1, TABLE, TITLE, title_line, VERSIO, 
      1                version_lcm, wsmet
-      COMPLEX BASIST(MDATA,MMETAB), CTERM(3), CY(MY), 
-     1        cy_sav(my, mmdegp3+7), DATAF(MDATA), 
-     1        DATAT(mdata), datat_work(munfil), 
-     1        H2OF(MDATA), h2of_work(mdata), 
-     1        H2OT(MDATA), H2OT_work(MDATA)
-      COMMON /BLCPLX/ BASIST, CTERM, CY, cy_sav, DATAF, DATAT, 
-     1                datat_work, H2OF, h2of_work, 
-     1                H2OT
+      COMPLEX BASIST(MDATA,MMETAB), CTERM(3), CY(MY),
+     1        cy_sav(my, mmdegp3+7), DATAF(MDATA),
+     1        DATAT(mdata), datat_work(munfil),
+     1        H2OF(MDATA), h2of_work(mdata),
+     1        H2OT(MDATA), H2OT_work(MDATA),
+     1        cy_saved_for_input(MY), cfit_total(MY)
+      COMMON /BLCPLX/ BASIST, CTERM, CY, cy_sav, DATAF, DATAT,
+     1                datat_work, H2OF, h2of_work,
+     1                H2OT, cy_saved_for_input, cfit_total
       DOUBLE PRECISION ALPBBS(mmdegp3+7), 
      2                 ALPBMN, ALPBMX, ALPHAB, ALPHAS, 
      2                 ALPSBS(mmdegp3+7), 
@@ -172,6 +176,8 @@ c
      4        csv_set_by_cli,
      4        prior_file_set_by_cli, save_prior_set_by_cli,
      4        save_prior_cap_warned,
+     4        save_input_set_by_cli, save_fit_set_by_cli,
+     4        save_freq_axis_set_by_cli, csv_extra_set_by_cli,
      4        year4d, zero_voxel(mvoxel)
       COMMON /BLLOG/ absval, accept_alpbmn, accept_step2, 
      4               areaba_orig_basisf, asymlp, badref, 
@@ -195,6 +201,8 @@ c
      4               csv_set_by_cli,
      4               prior_file_set_by_cli, save_prior_set_by_cli,
      4               save_prior_cap_warned,
+     4               save_input_set_by_cli, save_fit_set_by_cli,
+     4               save_freq_axis_set_by_cli, csv_extra_set_by_cli,
      4               year4d, zero_voxel
       COMMON /BLREAL/ ALEXT2(MMETAB), ALOG2, ALPBPN, 
      5 alpb_degp(0:mmdegp3), ALPBST, 

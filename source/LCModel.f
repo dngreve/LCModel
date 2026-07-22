@@ -204,6 +204,10 @@ C     -------------------------------------------------------------------------
       filraw_set_by_cli = .false.
       filh2o_set_by_cli = .false.
       csv_set_by_cli = .false.
+      save_input_set_by_cli = .false.
+      save_fit_set_by_cli = .false.
+      save_freq_axis_set_by_cli = .false.
+      csv_extra_set_by_cli = .false.
       NCLIARGS = COMMAND_ARGUMENT_COUNT()
       ICLIARG = 1
  45   IF (ICLIARG .GT. NCLIARGS) GO TO 46
@@ -316,6 +320,61 @@ C     -------------------------------------------------------------------------
             END IF
             save_prior_set_by_cli = .true.
             ICLIARG = ICLIARG + 2
+         ELSE IF (CLIARG(1:LCLIARG) .EQ. '-save-input') THEN
+            IF (ICLIARG + 1 .GT. NCLIARGS) THEN
+               WRITE (*, '(A)') 'Error: -save-input requires a prefix'
+               FLUSH(6)
+               STOP 1
+            END IF
+            CALL GET_COMMAND_ARGUMENT (ICLIARG+1, save_input_cli,
+     1                                  LCLIVAL, ISTATCLI)
+            IF (ISTATCLI .NE. 0) THEN
+               WRITE (*, '(A,I5,A)')
+     1            'Error: -save-input prefix is ', LCLIVAL,
+     2            ' characters, exceeding the 255-character limit'
+               FLUSH(6)
+               STOP 1
+            END IF
+            save_input_set_by_cli = .true.
+            ICLIARG = ICLIARG + 2
+         ELSE IF (CLIARG(1:LCLIARG) .EQ. '-save-fit') THEN
+            IF (ICLIARG + 1 .GT. NCLIARGS) THEN
+               WRITE (*, '(A)') 'Error: -save-fit requires a prefix'
+               FLUSH(6)
+               STOP 1
+            END IF
+            CALL GET_COMMAND_ARGUMENT (ICLIARG+1, save_fit_cli,
+     1                                  LCLIVAL, ISTATCLI)
+            IF (ISTATCLI .NE. 0) THEN
+               WRITE (*, '(A,I5,A)')
+     1            'Error: -save-fit prefix is ', LCLIVAL,
+     2            ' characters, exceeding the 255-character limit'
+               FLUSH(6)
+               STOP 1
+            END IF
+            save_fit_set_by_cli = .true.
+            ICLIARG = ICLIARG + 2
+         ELSE IF (CLIARG(1:LCLIARG) .EQ. '-save-freq-axis') THEN
+            IF (ICLIARG + 1 .GT. NCLIARGS) THEN
+               WRITE (*, '(A)')
+     1            'Error: -save-freq-axis requires a path'
+               FLUSH(6)
+               STOP 1
+            END IF
+            CALL GET_COMMAND_ARGUMENT (ICLIARG+1, save_freq_axis_cli,
+     1                                  LCLIVAL, ISTATCLI)
+            IF (ISTATCLI .NE. 0) THEN
+               WRITE (*, '(A,I5,A)')
+     1            'Error: -save-freq-axis path is ', LCLIVAL,
+     2            ' characters, exceeding the 255-character limit'
+               FLUSH(6)
+               STOP 1
+            END IF
+            save_freq_axis_set_by_cli = .true.
+            ICLIARG = ICLIARG + 2
+         ELSE IF (CLIARG(1:LCLIARG) .EQ. '-csv-extra') THEN
+            csv_extra_set_by_cli = .true.
+            ICLIARG = ICLIARG + 1
          ELSE
             WRITE (*, '(A,A)') 'Error: unrecognized command-line ',
      1                          'argument: '//CLIARG(1:LCLIARG)
@@ -328,6 +387,14 @@ C     -------------------------------------------------------------------------
      1   THEN
          WRITE (*, '(A)')
      1      'Error: -save-prior and -no-prior are mutually exclusive'
+         FLUSH(6)
+         STOP 1
+      END IF
+      IF ((save_input_set_by_cli   .OR.   save_fit_set_by_cli)   .AND.
+     1    .NOT.save_freq_axis_set_by_cli) THEN
+         WRITE (*, '(A)')
+     1      'Error: -save-freq-axis is required when -save-input or '//
+     2      '-save-fit is given'
          FLUSH(6)
          STOP 1
       END IF
@@ -551,6 +618,77 @@ C     -------------------------------------------------------------------------
          FLUSH(6)
          STOP 1
       END IF
+      IF (csv_extra_set_by_cli   .AND.   .NOT.csv_set_by_cli   .AND.
+     1    LCSV.LE.0) THEN
+         WRITE (*, '(A)')
+     1      'Error: -csv-extra requires CSV output to be enabled '//
+     2      '(use -csv or set lcsv in the control file)'
+         FLUSH(6)
+         STOP 1
+      END IF
+C     -------------------------------------------------------------------------
+C     Unit-collision guards for the new spectra-saving output units
+C       (15-19), same 9-variable sweep as -csv's/-prior-file's guards
+C       above, factored into CHECK_UNIT_COLLISION since there are now
+C       5 units to check instead of 1.
+C     -------------------------------------------------------------------------
+      IF (save_input_set_by_cli   .OR.   save_fit_set_by_cli) THEN
+         CALL CHECK_UNIT_COLLISION (15,
+     1      '-save-input/-save-fit (frequency-axis file)')
+      END IF
+      IF (save_input_set_by_cli) THEN
+         CALL CHECK_UNIT_COLLISION (16, '-save-input (real)')
+         CALL CHECK_UNIT_COLLISION (17, '-save-input (imag)')
+      END IF
+      IF (save_fit_set_by_cli) THEN
+         CALL CHECK_UNIT_COLLISION (18, '-save-fit (real)')
+         CALL CHECK_UNIT_COLLISION (19, '-save-fit (imag)')
+      END IF
+C     -------------------------------------------------------------------------
+C     Open the new spectra-saving output units.  Units 16-19 stay open
+C       across the whole run, written once per voxel from FINOUT, closed
+C       at end-of-run alongside LCSV.  Unit 15 (frequency-axis file) is
+C       opened here too, but written and closed in a single self-
+C       contained step inside FINOUT, on its one (first-analyzed-voxel)
+C       firing.
+C     -------------------------------------------------------------------------
+      IF (save_input_set_by_cli   .OR.   save_fit_set_by_cli) THEN
+         OPEN (15, FILE=save_freq_axis_cli, STATUS='UNKNOWN', ERR=870)
+      END IF
+      IF (save_input_set_by_cli) THEN
+         OPEN (16, FILE=save_input_cli(1:ilen(save_input_cli))//
+     1      '.real.csv', STATUS='UNKNOWN', ERR=871)
+         OPEN (17, FILE=save_input_cli(1:ilen(save_input_cli))//
+     1      '.imag.csv', STATUS='UNKNOWN', ERR=872)
+      END IF
+      IF (save_fit_set_by_cli) THEN
+         OPEN (18, FILE=save_fit_cli(1:ilen(save_fit_cli))//
+     1      '.real.csv', STATUS='UNKNOWN', ERR=873)
+         OPEN (19, FILE=save_fit_cli(1:ilen(save_fit_cli))//
+     1      '.imag.csv', STATUS='UNKNOWN', ERR=874)
+      END IF
+      GO TO 875
+ 870  WRITE (*, '(A)') 'Error: could not open -save-freq-axis '//
+     1   'output file: '//save_freq_axis_cli
+      FLUSH(6)
+      STOP 1
+ 871  WRITE (*, '(A)') 'Error: could not open -save-input real '//
+     1   'output file'
+      FLUSH(6)
+      STOP 1
+ 872  WRITE (*, '(A)') 'Error: could not open -save-input imag '//
+     1   'output file'
+      FLUSH(6)
+      STOP 1
+ 873  WRITE (*, '(A)') 'Error: could not open -save-fit real '//
+     1   'output file'
+      FLUSH(6)
+      STOP 1
+ 874  WRITE (*, '(A)') 'Error: could not open -save-fit imag '//
+     1   'output file'
+      FLUSH(6)
+      STOP 1
+ 875  CONTINUE
 C!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 c     Uncomment the following to initialize license KEYs and other Control
 c       Parameters for Frahm.
@@ -800,6 +938,14 @@ c                    never updated from data.
  110     continue
  100  continue
       if (lcsv .gt. 0) close (lcsv)
+      if (save_input_set_by_cli) then
+         close (16)
+         close (17)
+      end if
+      if (save_fit_set_by_cli) then
+         close (18)
+         close (19)
+      end if
       IF (save_prior_set_by_cli) THEN
          DEGPPM_CAPTURED = save_prior_sum_degppm /
      1                     float(save_prior_nsamples)
@@ -864,6 +1010,83 @@ C Normal exit
  801  call errmes(1, -4, chsubp)
  802  call errmes(2, -4, chsubp)
  803  call errmes(3, -4, chsubp)
+      END
+C
+C  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+      SUBROUTINE CHECK_UNIT_COLLISION (IUNIT, FLAGNAM)
+C     Checks IUNIT against every NAMELIST-settable unit variable that
+C       could collide with it -- the same 9-variable set -prior-file's
+C       unit-14 guard already established: LBASIS, LCOORD, lcoraw,
+C       LCSV, LH2O, LPRINT, LPS, LRAW, LTABLE.  FLAGNAM names the
+C       requesting flag/file for the error message.
+      INCLUDE 'lcmodel.inc'
+      INTEGER IUNIT
+      CHARACTER FLAGNAM*(*)
+      IF (LBASIS .EQ. IUNIT) THEN
+         WRITE (*, '(A,A,A,I3,A)') 'Error: ', FLAGNAM,
+     1      ' requires Fortran unit ', IUNIT,
+     2      ', but the control file already assigns that unit to '//
+     3      'LBASIS.  Change one of these settings.'
+         FLUSH(6)
+         STOP 1
+      ELSE IF (LCOORD .EQ. IUNIT) THEN
+         WRITE (*, '(A,A,A,I3,A)') 'Error: ', FLAGNAM,
+     1      ' requires Fortran unit ', IUNIT,
+     2      ', but the control file already assigns that unit to '//
+     3      'LCOORD.  Change one of these settings.'
+         FLUSH(6)
+         STOP 1
+      ELSE IF (lcoraw .EQ. IUNIT) THEN
+         WRITE (*, '(A,A,A,I3,A)') 'Error: ', FLAGNAM,
+     1      ' requires Fortran unit ', IUNIT,
+     2      ', but the control file already assigns that unit to '//
+     3      'lcoraw.  Change one of these settings.'
+         FLUSH(6)
+         STOP 1
+      ELSE IF (LCSV .EQ. IUNIT) THEN
+         WRITE (*, '(A,A,A,I3,A)') 'Error: ', FLAGNAM,
+     1      ' requires Fortran unit ', IUNIT,
+     2      ', but LCSV is already that unit (control file or '//
+     3      '-csv).  Change one of these settings.'
+         FLUSH(6)
+         STOP 1
+      ELSE IF (LH2O .EQ. IUNIT) THEN
+         WRITE (*, '(A,A,A,I3,A)') 'Error: ', FLAGNAM,
+     1      ' requires Fortran unit ', IUNIT,
+     2      ', but the control file already assigns that unit to '//
+     3      'LH2O.  Change one of these settings.'
+         FLUSH(6)
+         STOP 1
+      ELSE IF (LPRINT .EQ. IUNIT) THEN
+         WRITE (*, '(A,A,A,I3,A)') 'Error: ', FLAGNAM,
+     1      ' requires Fortran unit ', IUNIT,
+     2      ', but the control file already assigns that unit to '//
+     3      'LPRINT.  Change one of these settings.'
+         FLUSH(6)
+         STOP 1
+      ELSE IF (LPS .EQ. IUNIT) THEN
+         WRITE (*, '(A,A,A,I3,A)') 'Error: ', FLAGNAM,
+     1      ' requires Fortran unit ', IUNIT,
+     2      ', but the control file already assigns that unit to '//
+     3      'LPS.  Change one of these settings.'
+         FLUSH(6)
+         STOP 1
+      ELSE IF (LRAW .EQ. IUNIT) THEN
+         WRITE (*, '(A,A,A,I3,A)') 'Error: ', FLAGNAM,
+     1      ' requires Fortran unit ', IUNIT,
+     2      ', but the control file already assigns that unit to '//
+     3      'LRAW.  Change one of these settings.'
+         FLUSH(6)
+         STOP 1
+      ELSE IF (LTABLE .EQ. IUNIT) THEN
+         WRITE (*, '(A,A,A,I3,A)') 'Error: ', FLAGNAM,
+     1      ' requires Fortran unit ', IUNIT,
+     2      ', but the control file already assigns that unit to '//
+     3      'LTABLE.  Change one of these settings.'
+         FLUSH(6)
+         STOP 1
+      END IF
+      RETURN
       END
 C
 C
@@ -10087,6 +10310,7 @@ C     -------------------------------------------------------------------------
          if (lcy_skip(jy)) go to 210
          nrow = nrow + 1
          IF (ONLYFT) YFITRE(NROW,0)=0.
+         IF (ONLYFT) cfit_total(NROW)=(0.,0.)
          DCYFIT=(0.D0,0.D0)
          jcoeff_power = 0
          DO 220 JMETAB=1,NMETAB
@@ -10116,6 +10340,7 @@ c           -------------------------------------------------------------------
             IF (ONLYFT) THEN
                YFITRE(NROW,JMETAB)=SOLUTN(JMETAB)*real(REAL(DCSUM(1)))
                YFITRE(NROW,0)=YFITRE(NROW,0)+YFITRE(NROW,JMETAB)
+               cfit_total(NROW)=cfit_total(NROW)+SOLUTN(JMETAB)*DCSUM(1)
             ELSE
 C              ----------------------------------------------------------------
 C              Load derivatives wrt concentration coefficients.
@@ -10158,6 +10383,8 @@ C        ----------------------------------------------------------------------
             DCTERM=DCPHAS*DBLE(BACKGR(JY,JBACKG))
             IF (ONLYFT) THEN
                BACFIT=BACFIT+SNGL(SOLUTN(JSOL))*real(REAL(DCTERM))
+               IF (.NOT.SUBBAS) cfit_total(NROW)=cfit_total(NROW)+
+     1                                           SOLUTN(JSOL)*DCTERM
             ELSE
                DAMAT(NROW,JSOL)=DREAL(DCTERM)
                DCYFIT=DCYFIT+SOLUTN(JSOL)*DCTERM
@@ -10167,8 +10394,10 @@ C        ----------------------------------------------------------------------
             BACKRE(NROW)=BACFIT
             IF (SUBBAS) THEN
                YREAL(NROW)=REAL(CY(JY))-BACFIT
+               cy_saved_for_input(NROW)=CY(JY)-BACFIT
             ELSE
                YREAL(NROW)=REAL(CY(JY))
+               cy_saved_for_input(NROW)=CY(JY)
                DO 260 JMETAB=0,NMETAB
                   YFITRE(NROW,JMETAB)=YFITRE(NROW,JMETAB)+BACFIT
   260          CONTINUE
@@ -10724,19 +10953,20 @@ c     -----------------------------------------------------------------------
       external ilen, ldegmx
       parameter (mcsv=84)
       CHARACTER csv_element*56, csv_line(2)*(mcsv * 56 + 10),
-     1          FMTC*8, fmtdat*(mchfmt), fmtpm*10, FMTR*6, id*(mchid)
+     1          FMTC*8, fmtdat*(mchfmt), fmtpm*10, FMTR*6, id*(mchid),
+     1          csv_extra_element*120
       complex cfactor
       DOUBLE PRECISION DAPOSI(MPAR,MPAR), DSUM, dwork(mdwork_finout),
      1                 PHIOLD(2)
       integer nchar_metab(2)
       LOGICAL bruker, EFORM, INCLUD(MPAR), LDEGMX, LERROR, first_row,
-     1        seqacq, skip_line
-      REAL ERRCON(MCONC)
+     1        seqacq, skip_line, freq_axis_written
+      REAL ERRCON(MCONC), fwhm_csv
 CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
       COMMON DAPOSI, INCLUD, ERRCON, csv_line, dwork
 CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
-      save first_row
-      data first_row/.true./
+      save first_row, freq_axis_written
+      data first_row/.true./, freq_axis_written/.false./
       namelist /seqpar/ hzpppm
       namelist /nmid/ bruker, fmtdat, id, seqacq, tramp, volume
       EFORM(TERM)=(abs(TERM).GT.999.999 .OR. ABS(TERM).lt..0995) .AND.
@@ -11287,16 +11517,6 @@ c        -------------------------------------------------------------------
       END IF
       IF (LCOORD .GT. 0) WRITE (LCOORD,5590) (TABLE(J,2),J=1,LINTBL)
       IF (LTABLE .GT. 0) WRITE (LTABLE,5590) (TABLE(J,2),J=1,LINTBL)
-      if (lcsv .gt. 0) then
-         if (first_row   .and.   ioffset_current_in .le. 0) then
-            first_row = .false.
-            len_line = ilen(csv_line(1))
-            write (lcsv, 5589) csv_line(1)(:len_line)
-         end if
-         len_line = ilen(csv_line(2))
-         write (lcsv, 5589) csv_line(2)(:len_line)
- 5589    format(a)
-      end if
 C     -------------------------------------------------------------------------
 C     Load ETCOUT with further output.
 C     LINETC = no. of lines in ETCOUT.
@@ -11340,6 +11560,82 @@ c     -------------------------------------------------------------------------
      1    PHITOT(2) .gt. dgppmx + sddegp) CALL ERRMES (8, 2, CHSUBP)
       WRITE (ETCOUT(3),5595) NINT(PHITOT(1)), PHITOT(2)
  5595 FORMAT (' Ph:', I4, ' deg', f10.1, ' deg/ppm')
+C     -------------------------------------------------------------------------
+C     -csv-extra: append SNR/FWHM/data-shift/Phase0/Phase1/baseline
+C       columns to the CSV row, reusing the same values ETCOUT's own
+C       text output above just computed (SIGTON, fwhmls/fwhmst_full+
+C       FWHMBA, SHIFD, PHITOT, ALPBBS(2)/ALPSBS(2)).  FWHM branches on
+C       NSIDES exactly like ETCOUT's own FWHM write above, not
+C       hardcoded to fwhmls.
+C     -------------------------------------------------------------------------
+      if (lcsv .gt. 0   .and.   csv_extra_set_by_cli) then
+         if (nsides .gt. 0) then
+            fwhm_csv = fwhmls
+         else
+            fwhm_csv = SQRT(fwhmst_full**2+FWHMBA**2)
+         end if
+         if (first_row   .and.   ioffset_current_in .le. 0) then
+            len_line = ilen(csv_line(1))
+            csv_line(1) = csv_line(1)(:len_line) //
+     1         ', SNR, FWHM, Shift, Phase0, Phase1, alphaB, alphaS'
+         end if
+         write (csv_extra_element, 5599) NINT(SIGTON), fwhm_csv,
+     1      SHIFD, NINT(PHITOT(1)), SNGL(PHITOT(2)), SNGL(ALPBBS(2)),
+     2      SNGL(ALPSBS(2))
+ 5599    format(i4, ', ', f8.3, ', ', f8.3, ', ', i4, ', ', f10.1,
+     1          ', ', 1pe10.2, ', ', 1pe10.2)
+         len_line = ilen(csv_line(2))
+         csv_line(2) = csv_line(2)(:len_line) // ', ' //
+     1                 csv_extra_element(:ilen(csv_extra_element))
+      end if
+C     -------------------------------------------------------------------------
+C     Output to CSV file.  Relocated from its original position earlier
+C       in FINOUT (right after the concentration-table loop) so that
+C       -csv-extra's columns, computed just above, can be appended
+C       before the row is written.  Confirmed safe: no RETURN/STOP and
+C       no GO TO skip-around exists anywhere between the old and new
+C       positions (see CLAUDE.md goal #5, review round 2, item 3).
+C     -------------------------------------------------------------------------
+      if (lcsv .gt. 0) then
+         if (first_row   .and.   ioffset_current_in .le. 0) then
+            first_row = .false.
+            len_line = ilen(csv_line(1))
+            write (lcsv, 5589) csv_line(1)(:len_line)
+         end if
+         len_line = ilen(csv_line(2))
+         write (lcsv, 5589) csv_line(2)(:len_line)
+ 5589    format(a)
+      end if
+C     -------------------------------------------------------------------------
+C     -save-input / -save-fit: write the met complex input/fit spectra,
+C       plus (once per run) the shared frequency-axis file.  Row, Col
+C       repeated per point, matching this project's CSV convention.
+C       JY here indexes the same NROW-compacted, NYuse-length space
+C       YREAL/YFITRE/BACKRE already use below, so all files are
+C       point-aligned by construction (see CLAUDE.md goal #5).
+C     -------------------------------------------------------------------------
+      IF ((save_input_set_by_cli   .OR.   save_fit_set_by_cli)   .AND.
+     1    .NOT.freq_axis_written) THEN
+         freq_axis_written = .TRUE.
+         DO 5701 JY=1,NYuse
+            WRITE (15, 5700) PPM(JY)
+ 5700       FORMAT (1PE15.6)
+ 5701    CONTINUE
+         CLOSE (15)
+      END IF
+      IF (save_input_set_by_cli) THEN
+         DO 5702 JY=1,NYuse
+            WRITE (16, 5703) idrow, idcol, REAL(cy_saved_for_input(JY))
+            WRITE (17, 5703) idrow, idcol, AIMAG(cy_saved_for_input(JY))
+ 5703       FORMAT (I7, ', ', I7, ', ', 1PE15.6)
+ 5702    CONTINUE
+      END IF
+      IF (save_fit_set_by_cli) THEN
+         DO 5704 JY=1,NYuse
+            WRITE (18, 5703) idrow, idcol, REAL(cfit_total(JY))
+            WRITE (19, 5703) idrow, idcol, AIMAG(cfit_total(JY))
+ 5704    CONTINUE
+      END IF
       WRITE (ETCOUT(5),5596) NBACKG, NSIDES, INCSID
  5596 FORMAT (1X,I3, ' spline knots.', 3X, 'Ns =', I2, '(', I1, ')')
       LINETC=5
