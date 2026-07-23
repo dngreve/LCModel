@@ -965,6 +965,102 @@ without CSV enabled, unit collision) fire correctly with nonzero exit;
 confirmed to write exactly once even when both `-save-input` and
 `-save-fit` are given together (213 lines, not 426).
 
+### Post-commit follow-up: format re-decision, a real header bug, and a process lesson
+
+**`-save-input`/`-save-fit`'s CSV format was reconsidered, then
+deliberately kept — with corrected reasoning, not the original
+justification.** The original stated benefit ("reuse `read_lcm_csv`/
+`from-csv` with zero new Python code") turned out to be **false**: the
+actual on-disk format is *long* (one row per spectral point, `Row`/
+`Col` repeated identically for `NYuse` consecutive rows per voxel),
+which `from-csv`'s existing machinery (built for *wide* format — one
+row per voxel, a handful of named columns) cannot consume directly.
+Running it through unmodified would silently misbehave: repeated
+`(Row, Col)` values would cause each of a voxel's `NYuse` point-rows
+to overwrite the same mask position in sequence, leaving only the
+*last* point's value in the output volume — a serious silent-wrong-
+output failure, not just an inconvenience. **Confirmed: a new
+converter is needed no matter which format is chosen** — even
+switching to true wide format would require reopening the already-
+verified Fortran write logic to add buffering (holding all `NYuse`
+points in memory before writing one row per voxel), a real change to
+committed code, not a free win either. **Decision: keep long CSV**,
+on its own merits — cheap to write from Fortran (no buffering, matches
+the existing per-point write already inside `SOLVE`'s loop), and
+genuinely useful for this tool's actual purpose (ad-hoc debugging/
+inspection — trivially `grep`-able per voxel, opens directly in
+pandas/Excel/R with no custom tooling) — not because it reuses
+anything, since it doesn't.
+
+**A real bug was found through actual use, not testing: the header row
+was silently missing from all four `-save-input`/`-save-fit`
+files.** Root-caused precisely, with corroborating evidence, not just
+patched:
+- **The header-write line genuinely existed in the reviewed, approved
+  diff text** (`WRITE (16, '(A)') 'Row, Col, Value'`, in the
+  post-`MYCONT()` `OPEN`-statements block) — but `git log -p -S`
+  confirmed it **never once existed in git history**, meaning it was
+  never applied to disk at all, not lost afterward.
+- **Root cause identified via a structural fingerprint, not just
+  absence**: the applied code's error-label numbers (`870-875`)
+  didn't match the reviewed text's (`ERR=860`) either — proving the
+  apply phase had **reconstructed each diff piece against freshly-read
+  live source, from design intent, rather than transcribing the
+  reviewed text verbatim**. A small, compile-independent,
+  test-uncovered line like a header-write is exactly what's most at
+  risk in that workflow.
+- **Fix placed at the originally-reviewed location** (right after each
+  unit's `OPEN` call, which only executes once at startup — no
+  gating needed) rather than the first fix attempt's approach (a new
+  `SAVE`d one-shot flag inside `FINOUT`, gated on "first analyzed
+  voxel"). The `OPEN`-site placement isn't just simpler — it's more
+  robust: it guarantees the header exists even if a run analyzes zero
+  voxels (every voxel skipped), which the `FINOUT`-gated version
+  would silently fail to guarantee. Verified: net diff vs. the
+  committed goal #5 baseline is a clean 4-line addition, all three
+  regression baselines still pass byte-for-byte, header confirmed
+  present at line 1 of all four files on a real run, and the applied
+  fix confirmed **character-for-character identical** to the text
+  originally reviewed and approved (recovered from the session
+  transcript).
+- **Standing process lesson, adopted going forward**: this incident
+  has **no behavioral signature** — no test failure, no crash, nothing
+  downstream depends on a CSV header existing. Only direct inspection
+  of real output caught it. **After any future multi-piece diff is
+  applied, verifying the applied change against the last-reviewed
+  text (`git diff`, checked line-by-line or piece-by-piece) is now
+  its own explicit step, done before build/behavioral testing** — not
+  inferred from tests passing. This is a generalizable lesson,
+  recorded the same way the `average()`-caller and `ivoxel`/`COMMON`
+  incidents are: a specific, demonstrated failure mode this project
+  has now hit firsthand, not a hypothetical.
+
+**New tool: `lcm-convert from-spectral-csv`** — converts the long-format
+spectral CSVs to a volume, as genuinely new code (not a modification to
+`read_lcm_csv()`/`cmd_from_csv()`, which are unchanged and remain
+specific to the wide-format fit-results CSV):
+- `resolve_mask_flat_index()` — the `Col`-to-mask-voxel arithmetic,
+  extracted out of `cmd_from_csv()` into a shared helper (used by both
+  tools now, not duplicated).
+- `read_lcm_spectral_csv()` — groups rows by `(Row, Col)` in file
+  order (no re-sorting) into one spectrum per voxel.
+- `cmd_from_spectral_csv()` — validates point-count against the
+  frequency-axis file exactly (errors loudly on mismatch — no silent
+  truncate/pad), reuses `check_single_column_grid()`/
+  `mask_voxel_indices()`/`resolve_mask_flat_index()`, writes one frame
+  per spectral point (`NYuse` frames, not a small named-column set).
+- **Verified against real, post-header-fix data**: 10/10 voxels
+  populated, 213 frames; point-alignment confirmed empirically (the
+  same Cr/Cho/NAA/mI peak-matching check from goal #5's own Fortran-
+  side testing, reproduced through this new Python path — confirming
+  CSV row order genuinely matches `SOLVE`'s `NROW` iteration order,
+  not just assumed from the design); `cmd_from_csv`'s refactor
+  (factoring out `resolve_mask_flat_index()`) confirmed
+  behavior-preserving via bit-for-bit (`np.array_equal`) comparison
+  against its pre-refactor output; both new error paths (point-count
+  mismatch, wrong-CSV-shape fed to the wrong reader) fail loudly with
+  clear messages.
+
 ## Python pipeline: `lcm-control` / `lcm-convert` (`python/`)
 
 **STATUS: DONE, committed.** A separate, greenfield Python layer
