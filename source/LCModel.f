@@ -660,12 +660,16 @@ C     -------------------------------------------------------------------------
      1      '.real.csv', STATUS='UNKNOWN', ERR=871)
          OPEN (17, FILE=save_input_cli(1:ilen(save_input_cli))//
      1      '.imag.csv', STATUS='UNKNOWN', ERR=872)
+         WRITE (16, '(A)') 'Row, Col, Value'
+         WRITE (17, '(A)') 'Row, Col, Value'
       END IF
       IF (save_fit_set_by_cli) THEN
          OPEN (18, FILE=save_fit_cli(1:ilen(save_fit_cli))//
      1      '.real.csv', STATUS='UNKNOWN', ERR=873)
          OPEN (19, FILE=save_fit_cli(1:ilen(save_fit_cli))//
      1      '.imag.csv', STATUS='UNKNOWN', ERR=874)
+         WRITE (18, '(A)') 'Row, Col, Value'
+         WRITE (19, '(A)') 'Row, Col, Value'
       END IF
       GO TO 875
  870  WRITE (*, '(A)') 'Error: could not open -save-freq-axis '//
