@@ -37,6 +37,16 @@ none of the CLI flags require a particular extension.
            is determined by the extension given to --o (surfa dispatches
            automatically), same as any other surfa-based save.
 
+`from-spectral-csv` Read a long-format spectral CSV as written by
+           LCModel's -save-input/-save-fit flags (one row per spectral
+           point, not one row per voxel like from-csv's input), group
+           rows into one spectrum per voxel, and reassemble a volume with
+           one frame per spectral point (checked against the companion
+           -save-freq-axis file's line count). Uses the same Col-to-mask
+           mapping as from-csv (see resolve_mask_flat_index()), but is a
+           separate reader/subcommand since the CSV shape is different --
+           read_lcm_csv()/from-csv are unaffected.
+
 IMPORTANT, UNVERIFIED AGAINST THE REAL LIBRARY: all volume I/O here is
 written against surfa's documented API (`surfa.load_volume`, `Volume.data`,
 `Volume.save`, `Volume.geom`) as best known, but `surfa` was not installable
@@ -438,6 +448,28 @@ def read_lcm_csv(path: str):
     return col_indices, data_fields, values
 
 
+def resolve_mask_flat_index(col_1based: int, voxel_idx: np.ndarray, n_offset: int):
+    """Map a CSV row's 1-based "Col" field to its 0-based flat Fortran-order
+    index into voxel_idx (the mask's own voxel list), accounting for any
+    inserted-reference-voxel offset from to-lcm's --insert-first-voxel.
+
+    Shared by from-csv and from-spectral-csv -- both interpret "Col" the
+    same way (valid only under check_single_column_grid()'s ndrows=1/
+    ndslic=1 guard), so this arithmetic must not diverge between them.
+
+    Returns (flat_idx, status): status is None on success (flat_idx valid);
+    otherwise flat_idx is None and status is 'ref_voxel' (this Col is the
+    inserted reference voxel itself, not a real mask voxel -- silently
+    skip, not an error) or 'out_of_range' (Col is out of range for the
+    mask -- caller should warn)."""
+    mask_pos = col_1based - 1 - n_offset  # 0-based index into voxel_idx
+    if mask_pos < 0:
+        return None, "ref_voxel"
+    if mask_pos >= voxel_idx.size:
+        return None, "out_of_range"
+    return int(voxel_idx[mask_pos]), None
+
+
 def check_single_column_grid(control_path: str) -> None:
     """Hard runtime guard: from-csv's Col-is-a-flat-voxel-index mapping
     (see mask_voxel_indices()/cmd_from_csv() below) is only correct
@@ -487,23 +519,18 @@ def cmd_from_csv(args) -> int:
 
     n_written = 0
     for row_i, col_1based in enumerate(col_indices):
-        # col_1based is 1-based into the augmented (possibly
-        # reference-voxel-prepended) voxel list this session's LCModel run
-        # actually saw. Subtract the inserted-reference offset, then it's
-        # 1-based into voxel_idx (the mask's own voxel list).
-        mask_pos = col_1based - 1 - n_offset  # 0-based index into voxel_idx
-        if mask_pos < 0:
+        flat_idx, status = resolve_mask_flat_index(col_1based, voxel_idx, n_offset)
+        if status == "ref_voxel":
             # This row corresponds to the inserted reference voxel itself,
             # not a real mask voxel -- there's nowhere in the output volume
             # for it to go. Skip it.
             continue
-        if mask_pos >= voxel_idx.size:
+        if status == "out_of_range":
             print(f"lcm-convert: warning -- CSV row {row_i} has Col="
                   f"{col_1based}, out of range for {voxel_idx.size} mask "
                   f"voxels (with reference-offset {n_offset}); skipping.",
                   file=sys.stderr)
             continue
-        flat_idx = voxel_idx[mask_pos]
         for f_i, f in enumerate(data_fields):
             out_flat[flat_idx, f_i] = values[f][row_i]
         n_written += 1
@@ -512,6 +539,129 @@ def cmd_from_csv(args) -> int:
     save_volume(args.o, out_data, mask_geom)
     print(f"lcm-convert: wrote {args.o} ({n_written}/{voxel_idx.size} mask "
           f"voxels populated, {nframes} frames: {', '.join(data_fields)})",
+          file=sys.stderr)
+    return 0
+
+
+# -----------------------------------------------------------------------------
+# Stage 2 (alternate): from-spectral-csv -- reassembles the long-format
+# per-point spectral CSVs written by -save-input/-save-fit (source/
+# LCModel.f's FINOUT, units 16-19), NOT the wide concentration-table CSV
+# read_lcm_csv()/cmd_from_csv() handle above. Deliberately a separate
+# reader/subcommand, not a generalization of read_lcm_csv() -- the two
+# formats are opposite shapes (one header row naming each metabolite column
+# vs. one row per spectral point, Row/Col repeated every row) and serve
+# different use cases; read_lcm_csv()/cmd_from_csv() are left untouched.
+# -----------------------------------------------------------------------------
+
+def read_lcm_spectral_csv(path: str):
+    """Read a long-format LCModel spectral CSV: header 'Row, Col, Value',
+    one row per spectral point, Row/Col repeated identically for every
+    consecutive point-row belonging to one voxel (source/LCModel.f's
+    FINOUT writes NYuse consecutive rows per voxel, in NROW order, for
+    each of units 16/17/18/19).
+
+    Groups rows into one spectrum per voxel by iterating in file order and
+    keying on Col -- NOT by sorting -- since rows for one voxel are written
+    contiguously by construction; this preserves the file's own row order
+    within each group as the point/frame order, which is what makes the
+    result point-aligned with the companion -save-freq-axis file (verified
+    empirically against a real run, not just assumed from this ordering
+    argument -- see from-spectral-csv's own point-alignment test).
+
+    Returns (col_indices, spectra): col_indices is the list of 1-based Col
+    values in first-encountered order (one per voxel); spectra[col_1based]
+    is that voxel's list of float values, in file row order.
+    """
+    with open(path, newline="") as fp:
+        reader = csv_module.DictReader(fp)
+        fieldnames = reader.fieldnames
+        if fieldnames is None:
+            raise ValueError(f"{path}: no header row found")
+        # Same leading-space fix as read_lcm_csv() -- LCModel's header is
+        # comma-SPACE separated ('Row, Col, Value').
+        fieldnames = [f.strip() for f in fieldnames]
+        reader.fieldnames = fieldnames
+        expected = ["Row", "Col", "Value"]
+        if fieldnames != expected:
+            raise ValueError(
+                f"{path}: expected header {expected}, found {fieldnames} "
+                f"-- this reader is for the long-format -save-input/"
+                f"-save-fit spectral CSVs, not the wide concentration-"
+                f"table CSV (use from-csv for that).")
+        col_indices = []
+        spectra: dict[int, list] = {}
+        for row in reader:
+            col_1based = int(float(row["Col"].strip()))
+            value = float(row["Value"].strip())
+            if col_1based not in spectra:
+                spectra[col_1based] = []
+                col_indices.append(col_1based)
+            spectra[col_1based].append(value)
+    return col_indices, spectra
+
+
+def cmd_from_spectral_csv(args) -> int:
+    check_single_column_grid(args.control)
+
+    freq_axis = [float(line) for line in
+                 Path(args.freq_axis).read_text().splitlines() if line.strip()]
+    n_freq = len(freq_axis)
+    if n_freq == 0:
+        print(f"lcm-convert: {args.freq_axis} contains no frequency-axis "
+              f"values", file=sys.stderr)
+        return 1
+
+    col_indices, spectra = read_lcm_spectral_csv(args.csv)
+
+    # Mandatory point-count sanity check (item 4): every voxel's point
+    # count must match the frequency axis exactly -- error loudly rather
+    # than silently truncating/padding a mismatch.
+    for col_1based in col_indices:
+        n_points = len(spectra[col_1based])
+        if n_points != n_freq:
+            print(f"lcm-convert: {args.csv} voxel Col={col_1based} has "
+                  f"{n_points} points, but {args.freq_axis} has {n_freq} "
+                  f"frequency-axis values -- these must match exactly. "
+                  f"Refusing to silently truncate or pad.", file=sys.stderr)
+            return 1
+
+    mask_data, mask_geom = load_mask(args.mask)
+    voxel_idx = mask_voxel_indices(mask_data)
+
+    n_offset = 0
+    if args.meta:
+        meta = json.loads(Path(args.meta).read_text())
+        n_offset = meta.get("n_inserted_reference_voxels", 0)
+        if meta.get("n_voxels_in_mask") != voxel_idx.size:
+            print(f"lcm-convert: warning -- meta file records "
+                  f"{meta.get('n_voxels_in_mask')} mask voxels, but current "
+                  f"--mask has {voxel_idx.size}. Continuing, but verify this "
+                  f"is the same mask used in the to-lcm step.",
+                  file=sys.stderr)
+
+    spatial_shape = mask_data.shape
+    spatial = int(np.prod(spatial_shape))
+    out_flat = np.zeros((spatial, n_freq), dtype=np.float64)
+
+    n_written = 0
+    for col_1based in col_indices:
+        flat_idx, status = resolve_mask_flat_index(col_1based, voxel_idx, n_offset)
+        if status == "ref_voxel":
+            continue
+        if status == "out_of_range":
+            print(f"lcm-convert: warning -- {args.csv} has Col="
+                  f"{col_1based}, out of range for {voxel_idx.size} mask "
+                  f"voxels (with reference-offset {n_offset}); skipping.",
+                  file=sys.stderr)
+            continue
+        out_flat[flat_idx, :] = spectra[col_1based]
+        n_written += 1
+
+    out_data = out_flat.reshape(*spatial_shape, n_freq, order="F")
+    save_volume(args.o, out_data, mask_geom)
+    print(f"lcm-convert: wrote {args.o} ({n_written}/{voxel_idx.size} mask "
+          f"voxels populated, {n_freq} frames from {args.freq_axis})",
           file=sys.stderr)
     return 0
 
@@ -611,6 +761,42 @@ def build_arg_parser() -> argparse.ArgumentParser:
                               "there; safe to omit otherwise)")
     p_from.add_argument("--o", required=True, help="Output image volume path (format determined by extension, e.g. .nii.gz or .mgz)")
     p_from.set_defaults(func=cmd_from_csv)
+
+    p_spec = sub.add_parser("from-spectral-csv",
+                             help="Reassemble a long-format LCModel "
+                                  "spectral CSV (-save-input/-save-fit "
+                                  "output) into a multi-frame image volume, "
+                                  "one frame per spectral point")
+    p_spec.add_argument("--csv", required=True,
+                         help="Long-format spectral CSV (-save-input/"
+                              "-save-fit's <prefix>.real.csv or "
+                              ".imag.csv) -- NOT the wide concentration-"
+                              "table CSV (use from-csv for that)")
+    p_spec.add_argument("--freq-axis", required=True,
+                         help="The -save-freq-axis output file (one ppm "
+                              "value per line, no header); its line count "
+                              "must exactly match every voxel's point "
+                              "count in --csv, or this errors out rather "
+                              "than truncating/padding")
+    p_spec.add_argument("--control", required=True,
+                         help="The control file this run actually used "
+                              "(required, not optional -- same reason "
+                              "from-csv requires it: verifies ndrows=1 "
+                              "and ndslic=1, since Col only means 'flat "
+                              "mask-voxel index' for that specific grid "
+                              "shape)")
+    p_spec.add_argument("--mask", required=True,
+                         help="Same mask used in the corresponding to-lcm "
+                              "step")
+    p_spec.add_argument("--meta", default=None,
+                         help="Sidecar .meta.json from the to-lcm step "
+                              "(needed if --insert-first-voxel was used "
+                              "there; safe to omit otherwise)")
+    p_spec.add_argument("--o", required=True,
+                         help="Output image volume path (format "
+                              "determined by extension, e.g. .nii.gz or "
+                              ".mgz); one frame per spectral point")
+    p_spec.set_defaults(func=cmd_from_spectral_csv)
 
     return p
 
