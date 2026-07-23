@@ -170,6 +170,14 @@ for ns = [1:nslist]
   lcm.lps = 0;
   lcm.lprint = 0;
   lcm.lcoord = 0;
+  if(~mergevox) 
+    lcm.ltable = 7;
+    lcm.lps = 8;
+    lcm.lprint = 6;
+    lcm.lcoord = 9;
+    lcm.enableLCMspecFileOutput = 1;
+  end
+
 
   lcm.basis_file = sprintf('/homes/4/greve/.lcmodel/basis-sets/%s',basis_file);
   lcm.Fs = Fs;
