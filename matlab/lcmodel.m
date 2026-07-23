@@ -179,7 +179,7 @@ classdef lcmodel < handle
         fprintf(fp,' lprint = %d\n',lcm.lprint);
       end
       if lcm.enableLCMspecFileOutput
-        fprintf(fp,' filcoo = ''%s/%s.spec''\n',lcm.outdir,lcm.projectname);
+        fprintf(fp,' filcoo = ''%s/%s.coord''\n',lcm.outdir,lcm.projectname);
         fprintf(fp,' lcoord= %d\n',lcm.lcoord);
       end
       if lcm.enableLCMallSpecOutput
