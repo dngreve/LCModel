@@ -1061,6 +1061,57 @@ specific to the wide-format fit-results CSV):
   mismatch, wrong-CSV-shape fed to the wrong reader) fail loudly with
   clear messages.
 
+### Second follow-up: `-save-baseline <path>`
+
+**STATUS: DONE, implemented and verified.** Saves `met`'s baseline
+spectrum, same spirit as `-save-input`/`-save-fit` but structurally
+simpler: `BACKRE(NROW)=BACFIT` (`LCModel.f:~10398`) is written
+**unconditionally, before the `SUBBAS` branch splits** `YREAL`/
+`cy_saved_for_input` — confirmed `SUBBAS`-independent before
+implementing (not assumed from proximity to the split), so **no new
+`SOLVE`-loop accumulator was needed** — just wiring an already-correct,
+already-used-by-`.coord` array to a new output file.
+
+- **Single path argument, not a `<prefix>`** — matching `-save-freq-
+  axis`'s shape, since `BACKRE` is real-only (confirmed, no imaginary
+  component exists for it anywhere in `SOLVE`): one `Row, Col, Value`
+  CSV, not a real/imag pair.
+- **Requires `-save-freq-axis`** as a mandatory companion, same as
+  `-save-input`/`-save-fit` (extended the existing check's `OR`
+  condition). Fully independent/composable with the other two.
+- **New unit 20**, checked against the full collision inventory via
+  the existing `CHECK_UNIT_COLLISION` subroutine.
+- **Both process lessons from the header-write incident applied
+  proactively this time**, not just in response to a bug: header
+  write placed correctly from the start, and the applied diff was
+  checked against the reviewed/approved text before build/behavioral
+  testing — the standing practice adopted after that incident held up
+  on its first real use.
+- **Verified**: all three regression baselines pass byte-for-byte with
+  no new flags; all three error paths (missing `-save-freq-axis`,
+  missing path, unit collision) fire correctly; cross-checked against
+  `LCOORD`'s own `BACKRE` for a real voxel — max diff `0.000447`, fully
+  explained by `LCOORD`'s coarser `1PE11.3` print format (3 mantissa
+  digits, vs. 5 for `YREAL`/`YFITRE`) at that value's magnitude — same
+  print-rounding fingerprint as goal #5's original verification, not a
+  real discrepancy.
+
+**Correction to the record, for anyone reading this later**: partway
+through this follow-up, a `SUBBAS=T` `.ps` plot was compared against a
+`SUBBAS=F`-generated `-save-input`/`-save-fit` reconstruction and found
+not to match — initially raised as a possible bug. **This was a
+same-run mismatch, not a real problem**: `-save-input`/`-save-fit`'s
+output only needs to (and does) match `LCOORD`'s `YREAL`/`YFITRE` when
+compared against a run using the *same* `SUBBAS` setting — comparing
+across two different `SUBBAS` values will always show a real,
+*expected* difference (background subtracted vs. included), the same
+way comparing any two genuinely different control-file settings would.
+The earlier numeric verification (both `SUBBAS` branches, matched to
+print-rounding precision, plus a negative-control test proving
+background inclusion) already fully covers this — that verification
+was correct throughout; the confusion was in what was being compared
+against what, not in the Fortran/Python implementation.
+
 ## Python pipeline: `lcm-control` / `lcm-convert` (`python/`)
 
 **STATUS: DONE, committed.** A separate, greenfield Python layer

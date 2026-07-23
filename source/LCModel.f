@@ -372,6 +372,24 @@ C     -------------------------------------------------------------------------
             END IF
             save_freq_axis_set_by_cli = .true.
             ICLIARG = ICLIARG + 2
+         ELSE IF (CLIARG(1:LCLIARG) .EQ. '-save-baseline') THEN
+            IF (ICLIARG + 1 .GT. NCLIARGS) THEN
+               WRITE (*, '(A)')
+     1            'Error: -save-baseline requires a path'
+               FLUSH(6)
+               STOP 1
+            END IF
+            CALL GET_COMMAND_ARGUMENT (ICLIARG+1, save_baseline_cli,
+     1                                  LCLIVAL, ISTATCLI)
+            IF (ISTATCLI .NE. 0) THEN
+               WRITE (*, '(A,I5,A)')
+     1            'Error: -save-baseline path is ', LCLIVAL,
+     2            ' characters, exceeding the 255-character limit'
+               FLUSH(6)
+               STOP 1
+            END IF
+            save_baseline_set_by_cli = .true.
+            ICLIARG = ICLIARG + 2
          ELSE IF (CLIARG(1:LCLIARG) .EQ. '-csv-extra') THEN
             csv_extra_set_by_cli = .true.
             ICLIARG = ICLIARG + 1
@@ -390,11 +408,12 @@ C     -------------------------------------------------------------------------
          FLUSH(6)
          STOP 1
       END IF
-      IF ((save_input_set_by_cli   .OR.   save_fit_set_by_cli)   .AND.
-     1    .NOT.save_freq_axis_set_by_cli) THEN
+      IF ((save_input_set_by_cli   .OR.   save_fit_set_by_cli   .OR.
+     1     save_baseline_set_by_cli)   .AND.
+     2    .NOT.save_freq_axis_set_by_cli) THEN
          WRITE (*, '(A)')
-     1      'Error: -save-freq-axis is required when -save-input or '//
-     2      '-save-fit is given'
+     1      'Error: -save-freq-axis is required when -save-input, '//
+     2      '-save-fit, or -save-baseline is given'
          FLUSH(6)
          STOP 1
       END IF
@@ -632,9 +651,11 @@ C       (15-19), same 9-variable sweep as -csv's/-prior-file's guards
 C       above, factored into CHECK_UNIT_COLLISION since there are now
 C       5 units to check instead of 1.
 C     -------------------------------------------------------------------------
-      IF (save_input_set_by_cli   .OR.   save_fit_set_by_cli) THEN
+      IF (save_input_set_by_cli   .OR.   save_fit_set_by_cli   .OR.
+     1    save_baseline_set_by_cli) THEN
          CALL CHECK_UNIT_COLLISION (15,
-     1      '-save-input/-save-fit (frequency-axis file)')
+     1      '-save-input/-save-fit/-save-baseline (frequency-axis '//
+     2      'file)')
       END IF
       IF (save_input_set_by_cli) THEN
          CALL CHECK_UNIT_COLLISION (16, '-save-input (real)')
@@ -644,6 +665,9 @@ C     -------------------------------------------------------------------------
          CALL CHECK_UNIT_COLLISION (18, '-save-fit (real)')
          CALL CHECK_UNIT_COLLISION (19, '-save-fit (imag)')
       END IF
+      IF (save_baseline_set_by_cli) THEN
+         CALL CHECK_UNIT_COLLISION (20, '-save-baseline')
+      END IF
 C     -------------------------------------------------------------------------
 C     Open the new spectra-saving output units.  Units 16-19 stay open
 C       across the whole run, written once per voxel from FINOUT, closed
@@ -652,7 +676,8 @@ C       opened here too, but written and closed in a single self-
 C       contained step inside FINOUT, on its one (first-analyzed-voxel)
 C       firing.
 C     -------------------------------------------------------------------------
-      IF (save_input_set_by_cli   .OR.   save_fit_set_by_cli) THEN
+      IF (save_input_set_by_cli   .OR.   save_fit_set_by_cli   .OR.
+     1    save_baseline_set_by_cli) THEN
          OPEN (15, FILE=save_freq_axis_cli, STATUS='UNKNOWN', ERR=870)
       END IF
       IF (save_input_set_by_cli) THEN
@@ -670,6 +695,10 @@ C     -------------------------------------------------------------------------
      1      '.imag.csv', STATUS='UNKNOWN', ERR=874)
          WRITE (18, '(A)') 'Row, Col, Value'
          WRITE (19, '(A)') 'Row, Col, Value'
+      END IF
+      IF (save_baseline_set_by_cli) THEN
+         OPEN (20, FILE=save_baseline_cli, STATUS='UNKNOWN', ERR=876)
+         WRITE (20, '(A)') 'Row, Col, Value'
       END IF
       GO TO 875
  870  WRITE (*, '(A)') 'Error: could not open -save-freq-axis '//
@@ -689,6 +718,10 @@ C     -------------------------------------------------------------------------
       FLUSH(6)
       STOP 1
  874  WRITE (*, '(A)') 'Error: could not open -save-fit imag '//
+     1   'output file'
+      FLUSH(6)
+      STOP 1
+ 876  WRITE (*, '(A)') 'Error: could not open -save-baseline '//
      1   'output file'
       FLUSH(6)
       STOP 1
@@ -949,6 +982,9 @@ c                    never updated from data.
       if (save_fit_set_by_cli) then
          close (18)
          close (19)
+      end if
+      if (save_baseline_set_by_cli) then
+         close (20)
       end if
       IF (save_prior_set_by_cli) THEN
          DEGPPM_CAPTURED = save_prior_sum_degppm /
@@ -11611,15 +11647,17 @@ C     -------------------------------------------------------------------------
  5589    format(a)
       end if
 C     -------------------------------------------------------------------------
-C     -save-input / -save-fit: write the met complex input/fit spectra,
-C       plus (once per run) the shared frequency-axis file.  Row, Col
+C     -save-input / -save-fit / -save-baseline: write the met complex
+C       input/fit spectra and the real-only background spectrum, plus
+C       (once per run) the shared frequency-axis file.  Row, Col
 C       repeated per point, matching this project's CSV convention.
 C       JY here indexes the same NROW-compacted, NYuse-length space
 C       YREAL/YFITRE/BACKRE already use below, so all files are
 C       point-aligned by construction (see CLAUDE.md goal #5).
 C     -------------------------------------------------------------------------
-      IF ((save_input_set_by_cli   .OR.   save_fit_set_by_cli)   .AND.
-     1    .NOT.freq_axis_written) THEN
+      IF ((save_input_set_by_cli   .OR.   save_fit_set_by_cli   .OR.
+     1     save_baseline_set_by_cli)   .AND.
+     2    .NOT.freq_axis_written) THEN
          freq_axis_written = .TRUE.
          DO 5701 JY=1,NYuse
             WRITE (15, 5700) PPM(JY)
@@ -11639,6 +11677,11 @@ C     -------------------------------------------------------------------------
             WRITE (18, 5703) idrow, idcol, REAL(cfit_total(JY))
             WRITE (19, 5703) idrow, idcol, AIMAG(cfit_total(JY))
  5704    CONTINUE
+      END IF
+      IF (save_baseline_set_by_cli) THEN
+         DO 5705 JY=1,NYuse
+            WRITE (20, 5703) idrow, idcol, BACKRE(JY)
+ 5705    CONTINUE
       END IF
       WRITE (ETCOUT(5),5596) NBACKG, NSIDES, INCSID
  5596 FORMAT (1X,I3, ' spline knots.', 3X, 'Ns =', I2, '(', I1, ')')
