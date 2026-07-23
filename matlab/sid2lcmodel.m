@@ -25,7 +25,7 @@ randvox = 0;
 % Set mergevox=0 to have different files for each voxel. 
 % Set mergevox=1 to have one file for all voxels.
 % if mergevox>1, then it only keeps mergevox voxels.
-mergevox = 1;
+mergevox = 0;
 
 if(~exist('subjectstr','var')) subjectstr = ''; end
 
@@ -58,7 +58,7 @@ for ns = [1:nslist]
     % Below is a bug fixed on 7/17/26. It caused the imag ref to be equal to the
     % real ref. It affects the absolute measures (eg, NAA) but, shockingly,
     % has almost no impact on ratios (eg, NAA/Cr).  Claude explained it to
-    % me, but I don't really understand.
+    % me, see below.
     %refimagname =  sprintf('%s/ref.real.nii.gz',msdir);
     refimagname =  sprintf('%s/ref.imag.nii.gz',msdir);
     outtop = sprintf('%s/vol.lcm',msdir);
@@ -125,6 +125,7 @@ for ns = [1:nslist]
   
   nspect = metreal.nframes;
   
+  if(~mergevox) outtop = sprintf('%s.pv',outtop); end
   if(mergevox) outtop = sprintf('%s.mv',outtop); end
   if(randvox) 
     outtop = sprintf('%s.rand',outtop); 
@@ -225,6 +226,37 @@ end
 fprintf('sid2lcmodel done\n');
 
 return
+
+% This is claude's answer as to why the ratios did not change when the
+% imag part of the ref was really set to the real.
+
+% Since every metabolite's concentration is fit as a linear-combination
+% coefficient against this uniformly-rescaled datat, every metabolite
+% inherits the same fcalib factor — right or wrong. A ratio like NAA/Cr is
+% (C_NAA·fcalib)/(C_Cr·fcalib) — fcalib cancels algebraically, exactly,
+% regardless of what value it took. This is precisely why the MRS field
+% leans so heavily on ratio reporting — it's structurally immune to exactly
+% this class of error (water-referencing uncertainty, coil sensitivity,
+% partial volume, and, as you demonstrated, a real software bug).
+
+% Why it wasn't total garbage: area_water comes from areawa() (lines
+% 5413–5487), which fits a log-linear regression to alog(cabs(h2ot(j)))
+% across the water FID's time samples — it only ever looks at the magnitude
+% of the complex water signal via cabs(). Your bug produced ref = refreal +
+% i·refreal = (1+i)·refreal — a deterministic, smooth distortion (a fixed
+% complex rotation-and-scaling, |1+i| = √2, applied identically to every
+% real, physically-smooth, decaying sample), not noise or
+% instability. cabs((1+i)·x) = √2·|x| is still smooth, still positive — so
+% the regression still converges to a well-defined (if numerically wrong)
+% area_water, which flows into a well-defined (if wrong) fcalib, which
+% produces well-defined (if wrong) absolute concentrations. Nothing hit a
+% .le. 0. guard or produced NaN — the bug corrupted the value, not the
+% validity, of the intermediate quantities. Had the bug instead introduced
+% something incoherent (random noise, a mid-FID sign flip, a discontinuity),
+% you likely would have seen garbage or a crash — it's the specific shape of
+% this bug (a fixed linear transform of a smooth real signal) that made it
+% "quietly wrong" rather than catastrophic.
+
 
 tic;
 fprintf('nbrain = %d\n',nbrain);
