@@ -21,7 +21,7 @@ test_lcm/multi-voxel-10/multi-voxel.csv: binaries/linux/lcmodel
 package: binaries/linux/lcmodel.xz
 
 binaries/linux/lcmodel: source/LCModel.f | binaries/linux/
-	gfortran -std=legacy -O3 source/LCModel.f -o binaries/linux/lcmodel
+	gfortran -std=legacy -O3 -ffpe-summary=invalid,zero,overflow source/LCModel.f -o binaries/linux/lcmodel
 
 %/:
 	mkdir -p $@
