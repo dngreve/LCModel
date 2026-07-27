@@ -540,6 +540,16 @@ def cmd_from_csv(args) -> int:
     print(f"lcm-convert: wrote {args.o} ({n_written}/{voxel_idx.size} mask "
           f"voxels populated, {nframes} frames: {', '.join(data_fields)})",
           file=sys.stderr)
+
+    if args.frame_names:
+        with open(args.frame_names, "w", newline="") as f:
+            writer = csv_module.writer(f)
+            writer.writerow(["Frame", "Name"])
+            for f_i, name in enumerate(data_fields):
+                writer.writerow([f_i, name])
+        print(f"lcm-convert: wrote {args.frame_names} ({nframes} frames)",
+              file=sys.stderr)
+
     return 0
 
 
@@ -760,6 +770,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                               "(needed if --insert-first-voxel was used "
                               "there; safe to omit otherwise)")
     p_from.add_argument("--o", required=True, help="Output image volume path (format determined by extension, e.g. .nii.gz or .mgz)")
+    p_from.add_argument("--frame-names", default=None,
+                         help="Optional: also write a second CSV here with "
+                              "two columns (0-based frame number, the "
+                              "corresponding column-header name from --csv) "
+                              "-- e.g. to label the frames of --o's output "
+                              "volume")
     p_from.set_defaults(func=cmd_from_csv)
 
     p_spec = sub.add_parser("from-spectral-csv",

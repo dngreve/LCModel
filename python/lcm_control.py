@@ -66,7 +66,7 @@ PARAM_TABLE = [
     ("ltable",        "ltable",     "--ltable",      int,   None,                    ".TABLE output unit: 0=suppress (default: 7 if --filtab given, else 0)"),
     ("lps",           "lps",        "--lps",         int,   None,                    ".PS output unit: 0=suppress (default: 8 if --filps given, else 0)"),
     ("lcsv",          "lcsv",       "--lcsv",        int,   11,                      ".CSV output: 0=suppress, 11=make"),
-    ("lprint",        "lprint",     "--lprint",      int,   None,                    ".PRINT (detailed) output unit: 0=suppress (default: 6 if --filpri given, else 0)"),
+    ("lprint",        "lprint",     "--lprint",      int,   None,                    ".PRINT (detailed) output unit: 0=suppress (default: 10 if --filpri given, else 0)"),
     ("lcoord",        "lcoord",     "--lcoord",      int,   None,                    ".COORD output unit: 0=suppress (default: 9 if --filcoo given, else 0)"),
     ("hzpppm",        "hzpppm",     "--hzpppm",      float, None,                    "REQUIRED (no meaningful default exists): field strength, MHz proton resonance (42.58*B0 Tesla)"),
     ("filtab",        "filtab",     "--filtab",      str,   "",                      "Pathname of .TABLE output file"),
@@ -335,7 +335,14 @@ def write_control(ctrl: "LCMControl", out_path: str) -> None:
     # value (including 0) always wins outright, same as before.
     ltable = ctrl.ltable if ctrl.ltable is not None else (7 if ctrl.filtab else 0)
     lps = ctrl.lps if ctrl.lps is not None else (8 if ctrl.filps else 0)
-    lprint = ctrl.lprint if ctrl.lprint is not None else (6 if ctrl.filpri else 0)
+    # 10, not 6: unit 6 is Fortran's implicit stdout unit -- LCModel.f now
+    # has an always-on collision guard rejecting any control-file unit
+    # assignment of 6 (confirmed: closing LPRINT/LPS/LCOORD/LTABLE mid-run,
+    # which LCModel.f's EXITPS does unconditionally per voxel, silently
+    # redirects all subsequent terminal output to a fort.6 file if any of
+    # them is 6). 10 continues the 7/8/9 (table/ps/coord) sequence above
+    # without colliding with it or with LCModel.f's own reserved units.
+    lprint = ctrl.lprint if ctrl.lprint is not None else (10 if ctrl.filpri else 0)
     lcoord = ctrl.lcoord if ctrl.lcoord is not None else (9 if ctrl.filcoo else 0)
 
     lines = [" $LCMODL"]

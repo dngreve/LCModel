@@ -209,6 +209,89 @@ C     -------------------------------------------------------------------------
       save_freq_axis_set_by_cli = .false.
       csv_extra_set_by_cli = .false.
       NCLIARGS = COMMAND_ARGUMENT_COUNT()
+C     -------------------------------------------------------------------------
+C     -help: detected here, before the real parsing loop below, so it
+C       wins regardless of position or what else is on the command line
+C       (even a preceding malformed/unrecognized flag).  Skip (don't
+C       error) on GET_COMMAND_ARGUMENT truncation for unrelated long
+C       args -- '-help' itself is 5 characters and can never be affected
+C       by truncation.
+C     -------------------------------------------------------------------------
+      DO 44 IHELPARG = 1, NCLIARGS
+         CALL GET_COMMAND_ARGUMENT (IHELPARG, CLIARG, LCLIARG, ISTATCLI)
+         IF (ISTATCLI .EQ. 0   .AND.   CLIARG(1:LCLIARG) .EQ. '-help')
+     1      THEN
+            WRITE (*, '(A)') 'Usage: lcmodel [flags] < control.file'
+            WRITE (*, '(A)') ' '
+            WRITE (*, '(A)') 'Flags:'
+            WRITE (*, '(A)') '  -help'
+            WRITE (*, '(A)') '      Print this help text and exit.'
+            WRITE (*, '(A)') '  -no-prior'
+            WRITE (*, '(A)')
+     1         '      Never update the phase-correction prior'
+            WRITE (*, '(A)')
+     1         '      (DEGPPM/DEGZER/SDDEGP/SDDEGZ) during the run.'
+            WRITE (*, '(A)')
+     1         '      Mutually exclusive with -prior-file and'
+            WRITE (*, '(A)') '      -save-prior.'
+            WRITE (*, '(A)') '  -prior-file <path>'
+            WRITE (*, '(A)')
+     1         '      Read a fixed prior (degppm/degzer/sddegp/'
+            WRITE (*, '(A)')
+     1         '      sddegz key=value lines) from <path> and hold'
+            WRITE (*, '(A)') '      it fixed for the whole run.'
+            WRITE (*, '(A)')
+     1         '      Mutually exclusive with -no-prior.'
+            WRITE (*, '(A)') '  -i <met-file> <h2o-file>'
+            WRITE (*, '(A)')
+     1         '      Override the control file''s FILRAW/FILH2O.'
+            WRITE (*, '(A)') '      Both paths are mandatory.'
+            WRITE (*, '(A)') '  -csv <path>'
+            WRITE (*, '(A)')
+     1         '      Override the control file''s FILCSV and force'
+            WRITE (*, '(A)')
+     1         '      CSV output on (unit 11), regardless of the'
+            WRITE (*, '(A)') '      control file.'
+            WRITE (*, '(A)') '  -save-prior <path>'
+            WRITE (*, '(A)')
+     1         '      After the run, write the final computed'
+            WRITE (*, '(A)')
+     1         '      prior to <path>, in -prior-file''s format.'
+            WRITE (*, '(A)')
+     1         '      Mutually exclusive with -no-prior.'
+            WRITE (*, '(A)') '  -save-input <prefix>'
+            WRITE (*, '(A)')
+     1         '      Write <prefix>.real.csv/<prefix>.imag.csv:'
+            WRITE (*, '(A)') '      the met input spectrum.'
+            WRITE (*, '(A)') '      Requires -save-freq-axis.'
+            WRITE (*, '(A)') '  -save-fit <prefix>'
+            WRITE (*, '(A)')
+     1         '      Write <prefix>.real.csv/<prefix>.imag.csv:'
+            WRITE (*, '(A)') '      the met total fit spectrum.'
+            WRITE (*, '(A)') '      Requires -save-freq-axis.'
+            WRITE (*, '(A)') '  -save-freq-axis <path>'
+            WRITE (*, '(A)')
+     1         '      Write the shared ppm frequency axis once.'
+            WRITE (*, '(A)')
+     1         '      Required companion of -save-input,'
+            WRITE (*, '(A)') '      -save-fit, and -save-baseline.'
+            WRITE (*, '(A)') '  -save-baseline <path>'
+            WRITE (*, '(A)')
+     1         '      Write the met baseline spectrum (real-valued'
+            WRITE (*, '(A)') '      only).'
+            WRITE (*, '(A)') '      Requires -save-freq-axis.'
+            WRITE (*, '(A)') '  -csv-extra'
+            WRITE (*, '(A)')
+     1         '      Add SNR/FWHM/Shift/Phase0/Phase1/alphaB/'
+            WRITE (*, '(A)')
+     1         '      alphaS columns to the CSV output.'
+            WRITE (*, '(A)')
+     1         '      Requires CSV output already enabled (-csv'
+            WRITE (*, '(A)') '      or control-file lcsv).'
+            FLUSH(6)
+            STOP
+         END IF
+ 44   CONTINUE
       ICLIARG = 1
  45   IF (ICLIARG .GT. NCLIARGS) GO TO 46
          CALL GET_COMMAND_ARGUMENT (ICLIARG, CLIARG, LCLIARG, ISTATCLI)
@@ -646,6 +729,23 @@ C     -------------------------------------------------------------------------
          STOP 1
       END IF
 C     -------------------------------------------------------------------------
+C     Always-on unit-6 collision guard (no CLI flag gates this -- it is
+C       a pre-existing landmine, not tied to any new feature).  Unit 6 is
+C       Fortran's implicit stdout unit (WRITE(*,...)/PRINT * share it).
+C       EXITPS unconditionally CLOSEs LPRINT/LPS/LCOORD/LTABLE once per
+C       analyzed voxel, and LCSV is closed once at end-of-run; if the
+C       control file assigns any of the 9 NAMELIST-settable units to 6,
+C       everything written to unit 6 after that CLOSE silently redirects
+C       to a freshly-created fort.6 instead of the terminal, for the rest
+C       of the run.  Confirmed empirically (CLOSE(6) then WRITE(*,...)
+C       creates fort.6) and confirmed no LPRINT==6 feature exists in this
+C       fork to preserve (the manual's "Namelist PLTRAW" passage documents
+C       a different, absent companion program, PlotRaw -- not LCModel.f).
+C     -------------------------------------------------------------------------
+      CALL CHECK_UNIT_COLLISION (6,
+     1   'the terminal (unit 6 is Fortran''s implicit stdout unit, '//
+     2   'used by all WRITE(*,...) output)')
+C     -------------------------------------------------------------------------
 C     Unit-collision guards for the new spectra-saving output units
 C       (15-19), same 9-variable sweep as -csv's/-prior-file's guards
 C       above, factored into CHECK_UNIT_COLLISION since there are now
@@ -827,7 +927,41 @@ C     -------------------------------------------------------------------------
       write (*, '("lcsi_sav_1 "L1)') lcsi_sav_1
       write (*, '("omit_chless "L1)') omit_chless
       write (*, '("DOFULL "L1)') DOFULL
-      
+C     -------------------------------------------------------------------------
+c     Pre-scan to count how many voxels will actually be analyzed
+c       (nvoxels_to_analyze), for progress reporting below.  Mirrors
+c       skip_voxel's ROI/zero_voxel/nvoxsk terms exactly, but omits the
+c       ring/IOK term (irrelevant to a total count) and the checkpoint-
+c       resume term (nvoxels_done_in -- checkpoint/resume is out of scope
+c       per this project's own notes; omitting it means nvoxels_to_analyze
+c       may overcount slightly on a resumed run, a known, accepted
+c       limitation).  Intentionally duplicated logic, not a shared
+c       subroutine -- same accepted tradeoff as this file's other
+c       manually-synced constants (msamples, MCHFMT/MCHID).
+C     -------------------------------------------------------------------------
+      nvoxels_to_analyze = 0
+      ivoxel = 0
+      do 93 idslic = 1, ndslic
+         do 92 idrow = 1, ndrows
+            do 91 idcol = 1, ndcols
+               ivoxel = ivoxel + 1
+               if (idrow .lt. irowst   .or.
+     1             idrow .gt. irowen   .or.
+     2             idcol .lt. icolst   .or.
+     3             idcol .gt. icolen   .or.
+     4             idslic .ne. islice   .or.
+     5             zero_voxel(ivoxel)) go to 91
+               do 90 j = 1, nvoxsk
+                  if (idrow .eq. irowsk(j)   .and.
+     1                idcol .eq. icolsk(j)) go to 91
+ 90            continue
+               nvoxels_to_analyze = nvoxels_to_analyze + 1
+ 91         continue
+ 92      continue
+ 93   continue
+      nvoxels_progress_done = 0
+      nreport_every = max0(1, nvoxels_to_analyze / 20)
+
       do 100 ioffset = ioffset_current_in, noffset
          if (.not. voxel1) then
             rewind lraw
@@ -886,7 +1020,32 @@ C                 -------------------------------------------------------------
                   voxel1 = .false.
                   lraw_at_top = .false.
                   if (skip_voxel) go to 130
- 
+C                 -------------------------------------------------------------
+c                 Progress reporting: nvoxels_progress_done is a plain,
+c                   always-incrementing count of voxels actually analyzed
+c                   so far (monotonic, unlike raw ring/loop position) --
+c                   deliberately separate from nanalyses_done below, which
+c                   only increments when checkpoint-saving is active
+c                   (lcsi_sav_1 .eq. 12) and otherwise stays 0 all run.
+c                   Reported every ~5% of nvoxels_to_analyze (nreport_every,
+c                   set above), plus always on the final voxel.  Depends on
+c                   the unit-6 collision guard above: without it, this
+c                   output would be silently lost on any control file that
+c                   assigns unit 6 to one of the 9 NAMELIST-settable units.
+C                 -------------------------------------------------------------
+                  nvoxels_progress_done = nvoxels_progress_done + 1
+                  if (nvoxels_to_analyze .gt. 0   .and.
+     1                (mod(nvoxels_progress_done, nreport_every)
+     2                 .eq. 0   .or.
+     3                 nvoxels_progress_done .eq. nvoxels_to_analyze))
+     4               then
+                     write (*, '("Voxel ", I7, " of ", I7, " (", I3,
+     1                            "%)")') nvoxels_progress_done,
+     2                  nvoxels_to_analyze,
+     3                  nint(100.0 * float(nvoxels_progress_done) /
+     4                       float(nvoxels_to_analyze))
+                  end if
+
                   if (lcsi_sav_1 .eq. 12) then
                      nanalyses_done = nanalyses_done + 1
                      nvoxels_done = ivoxel
