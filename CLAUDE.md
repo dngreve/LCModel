@@ -1112,6 +1112,105 @@ background inclusion) already fully covers this — that verification
 was correct throughout; the confusion was in what was being compared
 against what, not in the Fortran/Python implementation.
 
+## Goal #6: usability fixes — `-help`, silent-stdout-loss fix, FPE noise, progress, `--frame-names`
+
+**STATUS: DONE, implemented, verified, committed.** Five small,
+independently-motivated additions — but one of them (`LPRINT=6`)
+turned out to be the most consequential single bug found in this whole
+project, discovered through actual use, not testing.
+
+**The `LPRINT=6` silent-stdout-loss bug — the biggest finding this
+session.** `EXITPS` unconditionally `CLOSE`s `LPRINT`/`LPS`/`LCOORD`/
+`LTABLE` once per voxel (and `LCSV` at end-of-run). Fortran unit `6`
+is pre-connected to stdout by default — but only *until* something
+explicitly `CLOSE`s it. If a control file sets **any** of those four
+`NAMELIST`-settable units to `6`, the first `CLOSE` disconnects unit 6
+from the terminal entirely — and since `WRITE(*,...)` (this project's
+own established output pattern, including every error message and the
+new progress-reporting feature) shares that same default-output
+mechanism, not an independent stream, **every subsequent terminal
+write silently redirects to a freshly-created `fort.6` file instead**,
+for potentially the remaining hours of a run. No error, no warning —
+the run just goes silent.
+
+- **Confirmed this fork has no compensating feature to preserve.** The
+  manual's documented `LPRINT=6` "dump `PLTRAW`" behavior belongs to a
+  **separate, absent companion program** (`PlotRaw`, not LCModel
+  itself — not present in this repo's `source/`). Traced directly, not
+  assumed from the manual's wording. Section 11.15's own LPRINT=6
+  example within LCModel proper is a one-shot diagnostic recipe paired
+  with a deliberate fatal abort (`PPMCEN=999.`) — structurally
+  incompatible with a real multi-voxel production run to begin with.
+  `6` has no special meaning inside `LCModel.f` — confirmed via direct
+  grep (zero `LPRINT .EQ. 6`-style branches, zero `PLTRAW` references)
+  — it's purely a landmine here.
+- **Live in production before this fix**: `lcm.control.master` set
+  `lprint=6` — not a hypothetical, an actual control file in active
+  use. **Also found in `lcm_control.py`'s own default** (`lprint=6`),
+  not just one stray control file — a second, independent instance of
+  the same landmine, caught by checking the Python side too rather
+  than assuming the bug was Fortran-only.
+- **Fixed**: new always-on `CHECK_UNIT_COLLISION(6, ...)` guard
+  (unconditional, no CLI flag needed — this isn't opt-in territory),
+  checking unit 6 against all 9 `NAMELIST`-settable units, same
+  established pattern as every other collision guard this project has
+  built. `lcm.control.master`'s `lprint` changed to an unused unit;
+  `lcm_control.py`'s default changed to `10` (confirmed distinct from
+  every other Python-side default — `7`/`8`/`9`/`11` — and from every
+  Fortran-side reserved unit).
+- **Verified with the thing that actually matters — a deliberate
+  collision test, not just confirming the guard exists**: `LTABLE=6`
+  and `LCOORD=6`, each independently, in a scratch control file —
+  both correctly trigger the guard, clear error naming the exact
+  colliding variable, exit code 1, before any voxel processing starts.
+  This is direct proof the fix catches the actual bug, not just that
+  code was added intended to.
+
+**Other additions, verified but lower-stakes:**
+- **`-ffpe-summary=invalid,zero,overflow`** (Makefile) — the "IEEE
+  underflow/denormal signalling" notice is `libgfortran` runtime
+  behavior (confirmed via build test, not LCModel source), controlled
+  entirely by this compile flag. Deliberately **not** `=none`: kept
+  the exception classes (`invalid`/`zero`/`overflow`) that tend to
+  indicate a real problem visible, suppressed only the confirmed-
+  benign `underflow`/`denormal` noise — consistent with this project's
+  general preference for letting real problems surface rather than
+  blanket-suppressing.
+- **`-help`** (single-dash, matching this project's convention — not
+  `--help`) — enumerates the actual current 10-flag CLI surface,
+  extracted directly from source rather than written from memory (the
+  flag list has grown across five goals; any staleness would make the
+  help text actively misleading). Fires regardless of position on the
+  command line. Spot-checked against everything actually built this
+  session — mutual-exclusivity/dependency notes (`-no-prior` vs.
+  `-prior-file`/`-save-prior`, `-save-freq-axis` required by all three
+  spectral-save flags, `-csv-extra`'s CSV-enabled requirement) all
+  accurate, nothing missing or wrong.
+- **Progress reporting** — a monotonic voxels-*completed* count
+  (deliberately distinct from the checkpoint-only `nanalyses_done`),
+  reported every ~5% via a pre-scan total-analyzable-voxel count.
+  Correctly excludes zero-voxels from the total (verified: the
+  100-voxel `multi-voxel` dataset reports progress against 96
+  analyzed, not 100). Always-on, not gated by a flag — purely
+  informational, doesn't affect output files/behavior. **Depends on
+  the `LPRINT=6` fix above** — progress messages would themselves be
+  silently lost under the same failure mode otherwise. Checkpoint/
+  resume interaction deliberately not addressed — consistent with
+  that mechanism's existing deferred-untested status from goal #1, not
+  a new gap.
+- **`lcm-convert from-csv --frame-names <path>`** — writes a companion
+  `(frame-number, column-name)` CSV. Scoped to `from-csv` only, not
+  `from-spectral-csv` (whose frames are already fully described by its
+  own `-save-freq-axis` file — a companion file there would be purely
+  redundant). No change to existing output when the flag is omitted
+  (confirmed byte-identical).
+
+**Verification summary**: clean rebuild; all three regression
+baselines pass byte-for-byte with no new flags; the `LPRINT=6`
+collision guard proven to actually fire via deliberate test; `-help`
+output spot-checked for accuracy against real flag behavior;
+`--frame-names` confirmed to preserve existing behavior when unused.
+
 ## Python pipeline: `lcm-control` / `lcm-convert` (`python/`)
 
 **STATUS: DONE, committed.** A separate, greenfield Python layer
